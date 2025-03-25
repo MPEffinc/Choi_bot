@@ -358,7 +358,7 @@ async def check_context():
             await clear_context()
             last_reset_time = time.time()
         else:
-            console_log = f"[DEBUG] 이미 초기화됨 (last_reset_time={last_reset_time}, 경과 시간={time.time() - last_reset_time})"
+            #console_log = f"[DEBUG] 이미 초기화됨 (last_reset_time={last_reset_time}, 경과 시간={time.time() - last_reset_time})"
             print(console_log)
             save__logs("Console", console_log)
     else:
@@ -414,11 +414,13 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
+    user = message.author.name
+    save__logs(user, message.content)
+    
     if message.channel.id not in ALLOWED_CH:
         return #allowed channel
     
-    user = message.author.name
-    save__logs(user, message.content)
+    
 
     #New Context
     if not conversation_context and is_called(message.content):
