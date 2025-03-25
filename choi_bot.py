@@ -358,9 +358,10 @@ async def check_context():
             await clear_context()
             last_reset_time = time.time()
         else:
-            #console_log = f"[DEBUG] 이미 초기화됨 (last_reset_time={last_reset_time}, 경과 시간={time.time() - last_reset_time})"
+            console_log = f"[DEBUG] 이미 초기화됨 (last_reset_time={last_reset_time}, 경과 시간={time.time() - last_reset_time})"
             print(console_log)
-            save__logs("Console", console_log)
+            #save__logs("Console", console_log)
+            
     else:
         console_log = f"[DEBUG] 맥락 대기중 (last_reset_time={last_reset_time}, 경과 시간={time.time() - last_reset_time})"
         print(console_log)
