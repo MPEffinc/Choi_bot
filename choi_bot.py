@@ -8,14 +8,16 @@ from collections import deque
 import time
 import asyncio
 from datetime import datetime
+import re
+from google.api_core.exceptions import ResourceExhausted
 
 #환경 변수 및 상수
 MAX_DIALOGS = 20 #대화 맥락 포함 이전 대화 수
 CONTEXT_EXPERATION = 120 #대화 맥락 유지 시간
-BUILD_VERSION = "1.4.1" 
-ALLOWED_CH = {1348180197714821172, 0} #허용된 대화 채널 ID
+BUILD_VERSION = "1.5.6" #최씨 봇 버전
+ALLOWED_CH = {1348180197714821172, 566975824767483945, 0} #허용된 대화 채널 ID
 ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
-ANNOUNCEMENT_TIME = 7200 #공지 올릴 시간
+ANNOUNCEMENT_TIME = 21600 #공지 올릴 시간
 CHECK_CONTEXT_TIME = 30 #맥락 체크 타이밍
 MODEL = "gemini-2.0-flash" #모델
 now = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S") #현재시각
@@ -34,18 +36,37 @@ def time_since(event_time):
     return f"{days}일 {hours}시간 {minutes}분 {seconds}초"
 leave_time = time_since(DEP_TIME)
 
+stopflag = 0 #API 요청 과부하로 중지 여부 (0: 재개, 1: 중지)
 
-#최씨 봇 정보
+
+#최씨 봇 정보 및 유저 아이디 매핑
+USER_MAP = {
+    "jhy.jng": "주효중",
+    "jhy.false": "주효중",
+    "choiyeongweon_": "주효중",
+    "hmeojidai": "김두멍",
+    "tokach_2": "지성게이",
+    "luna8810": "따이호",
+    "hiyom_1105": "김민트",
+    "soeun_0517": "문도",
+    "tokach_": "지성게이",
+    "sakura_0401_": "김유리",
+    "newhead": "성탄종",
+    "s1b1ltaeng": "서민수",
+    "jun_xx_": "박준혁",
+    "apwnel": "메뚜기",
+    "1killcut": "호영게이",
+    "zzin_bbangso": "조둥",
+    "mo3064": "이충선",
+    "taemin_park": "박태민"
+}
+
 INFORMATION = f"""
-**최씨 봇(가칭) 버전:{BUILD_VERSION} Made by jhy.jng**
-**최씨 봇 답변 준비 완료!**
-살아생전 최씨의 환상적인 부활을 만나보세요!
-오류가 있거나 개선 사항이 있으면 @jhy.false 으로 DM 부탁드립니다.
+**:robot: 미래 가젯 최씨 봇(가칭) 버전:{BUILD_VERSION} Made by jhy.jng**
 ```
-제공되는 모든 답변은 Google Gemini 2.0를 이용해 최씨를 모방하며,
-이 답변은 최씨의 의견을 대변하지 않습니다.
-최씨 봇의 성능 향상을 위해 최씨와의 대화 로그를 수집합니다.
-최씨와의 대화에 참여하면 유저 정보와 대화 내용을 수집하는 것에 동의한 것으로 간주됩니다.
+제공되는 모든 답변은 Google Gemini 2.0에 기반합니다.
+Generative AI 기능 사용을 위해, 본 서버의 모든 대화 로그를 수집합니다.
+대화에 참여하면 User ID와 대화 내용을 수집하는 것에 동의한 것으로 간주됩니다.
 봇 실행 시각: {now}
 Version: {BUILD_VERSION}```
 """
@@ -69,34 +90,22 @@ WHO_AM_I = f"""
 PATCHNOTE = f"""
 # 최씨 봇 {BUILD_VERSION} 버전 개발자 노트
 {BUILD_VERSION} 버전의 **주요 업데이트 사항**
-## 프롬프트 개선
-이번 버전에서는 프롬프트를 대폭 수정하였습니다.
-최씨가 반복적으로 특정 단어, 어절을 출력하는 현상, 맥락을 제대로 파악하지 못하는 현상,
-부정적인 단어만 지속적으로 사용하는 현상, 계속 답변하지 않는(무응답) 현상 등이 개선되었습니다.
-
-## 이제 최씨 봇이 조금 더 인간적으로 말합니다.
-대화 하나 당 일대일 대응으로 말하지 않습니다. 사용자의 추가 질의가 필요하거나, 
-의미 없는 단어 혹은 문장이라고 판단했거나, 타 사용자 대상 질문인 경우,
-최씨 봇은 다음 질의를 기다리거나, 응답하지 않습니다.
-
-## 실제 최씨와 닮은 부분을 추가했습니다.
-만일 대화가 끝났다고 최씨 봇이 판단했을 경우, ***마이크를 끕니다!***
-**(마이크 끄는 소리)**라고 최씨 봇의 응답이 생성되면, 자동으로 Context를 종료합니다!
-!후앰아이 명령어로 나오는 최씨의 자기소개를 일부 현실과 맞게 수정했습니다.
-
-## 최씨가 떠난 날짜 계산
-최씨가 우리의 곁을 떠난 시간이 궁금하신가요?
-지금 바로 알아보세요! ```!언제와``` 명령어를 사용하면,
-최씨가 우리의 곁을 몇날며칠 몇시간 몇분 몇초 떠났는지 알 수 있습니다!
-
-```
+## Generative AI 활용 기능 추가
+### 요약 및 검색 기능
+- 이제 최씨 봇에게, `!요약 YYYY-MM-DD`와 같이 명령하면, 해당 날짜의 채팅 로그 기록을 분석합니다.
+- `!찾기 YYYY-MM-DD 찾고 싶은 내용`과 같이 명령하면, 해당 날짜 로그 기록에서 찾고 싶은 내용을 찾아 요약합니다.
+``` 
 수정 사항
-1. !자세히 명령어에서, 2000자가 넘으면 디스코드 봇 메시지 상한을 초과하여 답변이 출력되지 않는 현상을 수정하였습니다.
-2. 인간 관계 프롬프트를 일부 수정하였습니다.
-3. 최씨가 맥락을 파악할 때, 자기 자신의 대화를 Deque에 저장하지 않는 문제를 해결했습니다.
-4. 긴급 수정: 최씨가 너무 수위가 높은 답변을 생성하는 문제를 개선했습니다.
+1. API 키를 4개로 늘려, 요청 제한 문제를 해결했습니다.(1.5.1)
+2. API 키 요청 과부하 시, 다음 키를 사용하도록 설정했습니다. (1.5.1)
+3. 봇 동작 검증을 위한 메시지가 2시간 -> 6시간마다 전송됩니다. (1.5.3)
+4. 요약 기능의 경우, API 요청 과부하로 인해 일시 중단될 수 있습니다. (1.5.3)
+5. API 순환 로직을 일부 수정하여, 성능을 개선했습니다. (1.5.4)
+6. 콘솔 로그가 대화 로그에 저장되지 않도록 수정했습니다. (1.5.5)
+7. 서버 시간이 UTC로 설정되어있어, KST로 변경했습니다. (1.5.5)
+8. 요약 기능이 10초 초과 시, API 키를 교체하고 재시도하도록 수정했습니다. (1.5.6)
+9. 요약이 2000자를 초과하지 않도록 수정했습니다. (1.5.6)
 ```
-
 """
 
 #명령어 리스트
@@ -112,6 +121,8 @@ COMMAND_LIST = f"""
 - !질문 `내용` : 질문 내용을 **멍청한 최씨**가 답해줍니다. ~~진짜로 정확하지 않을 수 있습니다...~~
 - !알려줘 `내용` : 질문 내용을 **똑똑한 최씨**가 답해줍니다. ~~다만 정확하지 않을 수 있습니다...~~
 - !자세히 `내용` : 질문 내용을 **더 똑똑한 최씨**가 자세하게 답해줍니다. ~~얘는 그나마 쓸만합니다...~~
+- !요약 `YYYY-MM-DD` : 해당 날짜 채팅 로그 전체를 요약해줍니다.
+- !찾기 `YYYY-MM-DD` `내용` : 해당 날짜 채팅 로그에서 특정 내용을 찾아 요약합니다.
 **GPT기능을 사용한 질문은 맥락 파악 기능이 활성화되지 않습니다.**
 
 채팅에 {str(KEY_WORDS)} 같은 내용이 포함되면 맥락을 파악하여 **Gemini 2.0기반 답변**을 제공합니다!
@@ -234,17 +245,67 @@ CHARACTER_PROMPT = """
 
 # .env 파일에서 API 키 & 토큰 로드
 load_dotenv(dotenv_path="./ini.env")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+API_KEYS = [
+    os.getenv("GOOGLE_API_KEY1"),
+    os.getenv("GOOGLE_API_KEY2"),
+    os.getenv("GOOGLE_API_KEY3"),
+    os.getenv("GOOGLE_API_KEY4")
+]
+current_api_index = 0
+call_count = 0
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
+genai.configure(api_key=API_KEYS[current_api_index])  # 초기 API 키 설정
+model = genai.GenerativeModel(MODEL)
+
+if API_KEYS is None or len(API_KEYS) == 0:
+    raise ValueError("Google Generative AI API KEY ERROR!")
 if DISCORD_BOT_TOKEN is None:
     raise ValueError("Discord Bot TOKEN ERROR!")
-if GOOGLE_API_KEY is None:
-    raise ValueError("Google API ERROR!")
+
+
+
+def get_next():
+    global current_api_index
+    api_key = API_KEYS[current_api_index]
+    current_api_index = (current_api_index + 1) % len(API_KEYS)  # 라운드 로빈 방식으로 순환
+    print(current_api_index)
+    return api_key
 
 # Google AI API 설정
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel(MODEL)
+def conf_next():
+    global call_count, model
+    if call_count >= 5:
+        genai.configure(api_key=get_next())
+        model = genai.GenerativeModel(MODEL)
+        print(f"[DEBUG] API 키 변경됨: {current_api_index}번 키: {API_KEYS[current_api_index]}")
+        call_count = 0
+        return model
+    call_count += 1
+
+async def generate_content_timeout(prompt, timeout=10):
+    global model
+    loop = asyncio.get_event_loop()
+    try:
+        response = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: model.generate_content(prompt)),
+            timeout=timeout
+        )
+        return response
+    except asyncio.TimeoutError:
+        print("[경고] 10초 초과! API 키 교체 후 재시도 중...")
+        conf_next()
+        try:
+            response = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: model.generate_content(prompt)),
+                timeout=timeout
+            )
+            return response
+        except asyncio.TimeoutError:
+            print("[실패] 재시도도 실패. 해당 청크는 스킵.")
+            return None
+
+
 
 # 디스코드 봇 설정
 intents = discord.Intents.default()
@@ -286,7 +347,7 @@ conversation_context = deque(maxlen=MAX_DIALOGS)
 #마지막 대화 시간 저장
 last_conversation_time = 0
 
-#최근 대화 내역 저장, 사용자 맥락 추가가
+#최근 대화 내역 저장, 사용자 맥락
 def update_context(user, message):
     global last_conversation_time
     conversation_context.append(f"{user}: {message}")
@@ -295,7 +356,7 @@ def update_context(user, message):
 
 #최근 대화 내역 가져오기
 def get_context():
-    return "/n".join(conversation_context)
+    return "\n".join(conversation_context)
 
 #최근 대화 참여자가 존재하고, 2분 이내면 True 반환
 def is_alive():
@@ -319,7 +380,7 @@ async def clear_context(arg = "Auto"):
         await channel.send(texts)
     console_log = f"[DEBUG] 대화 맥락 초기화됨: {arg}"
     print(console_log)
-    save__logs("Console", console_log)
+    #save__logs("Console", console_log)
 
 #최씨가 불렸는지 확인인
 def is_called(message:str):
@@ -354,7 +415,7 @@ async def check_context():
         if (last_reset_time == 0 or (time.time() - last_reset_time) > CONTEXT_EXPERATION) and reset_flag == 0:
             console_log = f"[DEBUG] 맥락 자동 초기화 실행 (last_reset_time={last_reset_time})"
             print(console_log)
-            save__logs("Console", console_log)
+            #save__logs("Console", console_log)
             await clear_context()
             last_reset_time = time.time()
         else:
@@ -365,7 +426,7 @@ async def check_context():
     else:
         console_log = f"[DEBUG] 맥락 대기중 (last_reset_time={last_reset_time}, 경과 시간={time.time() - last_reset_time})"
         print(console_log)
-        save__logs("Console", console_log)
+        #save__logs("Console", console_log)
 
 
 @send_announcement.before_loop
@@ -388,7 +449,7 @@ async def reply(message, response):
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 답변 생성됨. 질의: {message.content} 내용: {reply_text}"
         print(console_log)
-        save__logs("Console", console_log)
+        #save__logs("Console", console_log)
         await clear_context("Finite Context")
         return 
     if "00100" not in reply_text:
@@ -396,12 +457,12 @@ async def reply(message, response):
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 답변 생성됨. 질의: {message.content} 내용: {reply_text}"
         print(console_log)
-        save__logs("Console", console_log)
+        #save__logs("Console", console_log)
     elif "00100" in reply_text:
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 답변 생성되었으나, return Code: {reply_text} 질의: {message.content}"
         print(console_log)
-        save__logs("Console", console_log)
+        #save__logs("Console", console_log)
     update_context("최씨 봇", reply_text)
     
     
@@ -430,6 +491,7 @@ async def on_message(message):
         update_context(user, message.content)
         global reset_flag
         try:
+            conf_next()
             reset_flag = 0
             response = model.generate_content(f"""
             {CHARACTER_PROMPT}
@@ -449,6 +511,7 @@ async def on_message(message):
     elif conversation_context and is_alive():
         update_context(user, message.content)
         try:
+            conf_next()
             reset_flag = 0
             response = model.generate_content(f"""
             {CHARACTER_PROMPT}
@@ -472,6 +535,315 @@ async def on_message(message):
 @bot.command()
 async def test(ctx):
     await ctx.send("Test Message")
+
+
+@bot.command()
+async def config(ctx, command: str, value: str = None, args: str = None):
+    global stopflag
+    print(command)
+    if command == None:
+        print("No command provided")
+    if command == "summary":
+        if value == 'True':
+            stopflag = 0
+            await ctx.send("`요약 기능 활성화`")
+            return
+        elif value == 'False':
+            stopflag = 1
+            await ctx.send("`요약 기능 비활성화`")
+            return
+        else: 
+            await ctx.send("`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
+        return
+    elif command == "user":
+        if value is None:
+            await ctx.send(f"```유저 ID 매핑 {USER_MAP}```")
+            return
+        elif value in USER_MAP:
+            if args == "delete":
+                del USER_MAP[value]
+                await ctx.send(f"`유저 ID 매핑 삭제: {value}`")
+                return
+            if args is None:
+                await ctx.send(f"`User ID {value}의 이름: {USER_MAP[value]}`")
+                return
+            USER_MAP[value] = args
+            await ctx.send(f"`기존 유저 ID 매핑 업데이트: {value} -> {args}`")
+            return
+        elif value not in USER_MAP and args != None:
+            USER_MAP[value] = args
+            await ctx.send(f"`신규 유저 ID 매핑: {value} -> {args}`")
+            return
+        else:
+            await ctx.send("`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
+            return
+
+    elif command == "help" or command == None:
+        msg = """
+```
+!config summary True : 요약 기능 활성화
+!config summary False : 요약 기능 비활성화
+!config user <user_id> <real_name> : 유저 ID 매핑 추가/업데이트
+!config help : 이 도움말 메시지 표시
+```
+        """
+        await ctx.send(msg)
+        return
+    await ctx.send("`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
+    return
+
+@bot.command()
+async def 요약(ctx, date: str):
+    if (stopflag == 1):
+        await ctx.send("API 요청 과부하로, 잠시 서비스를 중지합니다.")
+        return
+    start_time = time.time()
+    log_file = os.path.join('logs', f"{date}.txt")
+    if not os.path.exists(log_file):
+        await ctx.send("파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
+        return
+    await ctx.send(f"`{MODEL}을 이용해 요약 중...`")
+    try:
+        pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
+        messages = []
+
+        with open(log_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                match = pattern.match(line)
+                if match:
+                    timestamp = match.group(1)
+                    user_id = match.group(2)
+                    message = match.group(3)
+                    dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                    time_formatted = dt.strftime("%H:%M")
+                    real_name = USER_MAP.get(user_id, user_id)
+                    messages.append(f"[{time_formatted}] {real_name}: {message}")
+        await ctx.send(f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
+        
+        if not messages:
+            await ctx.send("파일에 분석할 내용이 없습니다.")
+            return
+        
+        combined_text = "\n".join(messages)
+        chunk_size = 4000
+        chunks = [combined_text[i:i + chunk_size] for i in range(0, len(combined_text), chunk_size)]
+        
+        await ctx.send(f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
+
+        all_summaries = []
+        max_retry = len(API_KEYS)  # 최대 재시도 횟수는 API 키 개수로 설정
+
+        for idx, chunk in enumerate(chunks):
+            prompt = f"""
+다음은 엄청 친한 찐친들의 Discord 채팅방에서의 대화 로그 일부분이다.
+총 {len(chunks)}개의 로그 중, {idx+1}번째 로그이다.
+해당 내용을 요약해서 전반적인 대화 흐름 및 주제, 자주 나오는 키워드,
+나눴던 대화내용(대표적인 발화) 등을 {4000/len(chunks)}자 이내로 정리 및 요약하라.
+{chunk}
+요약: 
+            """
+            success = False
+            attempt = 0
+            while not success and attempt < max_retry:
+                conf_next()
+                try:
+                    response = await generate_content_timeout(prompt)
+                    summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
+                    all_summaries.append(summary)
+                    print(f"[DEBUG]: {idx + 1}: {summary}\n")
+                    await ctx.send(f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
+                    success = True
+                except Exception as e:
+                    if e is ResourceExhausted:
+                        err = "API 요청 과부하!"
+                    elif e is TimeoutError:
+                        err = "요약 요청이 10초를 초과했습니다."
+                    else:
+                        err = str(e)
+                    await ctx.send(f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                    attempt += 1
+                    await asyncio.sleep(2)  # 잠시 대기 후 재시도
+            if not success:
+                await ctx.send(f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
+         # 최종 요약 요청
+        await ctx.send(f"`최종 요약 진행 중...`")
+        combined_summaries = " ".join(all_summaries)
+        final_prompt = f"""
+다음은 Discord 대화 로그를 나눠 요약한 부분 요약들입니다. 
+이 부분 요약들을 종합하여 전반적인 대화 흐름 및 주제, 자주 나오는 키워드,
+나눴던 대화 내용(대표적인 발화) 등을 하나로 통합해서 최종 요약을 1500자 이내로 정리 및 요약하라.
+답변은 절대 2000자를 초과해선 안 된다.
+줄바꿈 혹은 마크다운 형식을 이용해 보기 편하게 정리하라.
+{combined_summaries}
+
+최종 요약:
+        """
+        success = False
+        attempt = 0
+        while not success and attempt < max_retry:
+            conf_next()
+            try:
+                final_response = await generate_content_timeout(final_prompt)
+                final_summary = final_response.text if hasattr(final_response, 'text') else "최종 요약 실패."
+                if len(final_summary) > 2000:
+                    raise ValueError("최종 요약이 2000자를 초과했습니다.")
+                success = True
+            except Exception as e:
+                if e is ResourceExhausted:
+                    err = "API 요청 과부하!"
+                elif e is TimeoutError:
+                    err = "최종 요약 요청이 10초를 초과했습니다."
+                else:
+                    err = str(e)
+                await ctx.send(f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                attempt += 1
+                await asyncio.sleep(2)
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        await ctx.send(f"`{MODEL}: 요약 소요 시간: {elapsed_time:.2f}s`")
+        await ctx.send(f"# {date}에는 이런 대화들을 나눴어요!\n{final_summary}")
+
+    except Exception as e:
+        await ctx.send(f"요약 중 오류 발생: {str(e)}")
+
+
+
+
+@bot.command()
+async def 찾기(ctx, date: str, *,find: str):
+    if (stopflag == 1):
+        await ctx.send("API 요청 과부하로, 잠시 서비스를 중지합니다.")
+        return
+    if find is None:
+        await ctx.send("찾고 싶은 내용을 입력해주세요. 예: `!찾기 YYYY-MM-DD 찾고 싶은 내용`")
+        return
+    
+    start_time = time.time()
+    log_file = os.path.join('logs', f"{date}.txt")
+    if not os.path.exists(log_file):
+        await ctx.send("파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
+        return
+    await ctx.send(f"`{MODEL}을 이용해 찾는 중...`")
+    try:
+        pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
+        messages = []
+
+        with open(log_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                match = pattern.match(line)
+                if match:
+                    timestamp = match.group(1)
+                    user_id = match.group(2)
+                    message = match.group(3)
+                    dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                    time_formatted = dt.strftime("%H:%M")
+                    real_name = USER_MAP.get(user_id, user_id)
+                    messages.append(f"[{time_formatted}] {real_name}: {message}")
+        await ctx.send(f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
+        
+        if not messages:
+            await ctx.send("파일에 분석할 내용이 없습니다.")
+            return
+        
+        combined_text = "\n".join(messages)
+        chunk_size = 4000
+        chunks = [combined_text[i:i + chunk_size] for i in range(0, len(combined_text), chunk_size)]
+        
+        await ctx.send(f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
+
+        all_summaries = []
+        max_retry = len(API_KEYS)
+
+        for idx, chunk in enumerate(chunks):
+            prompt = f"""
+다음은 엄청 친한 찐친들의 Discord 채팅방에서의 대화 로그 일부분이다.
+총 {len(chunks)}개의 로그 중, {idx+1}번째 로그이다.
+사용자는 다음과 같은 내용을 찾기를 원하고 있다.
+사용자가 질의한 내용: {find}
+전체 내용 중, 사용자가 질의한 내용과 관련된 대화가 있다면
+해당 내용의 대화 흐름 및 주제, 자주 나오는 키워드,
+나눴던 대화 내용(대표적인 발화) 등을 {4000/len(chunks)}자 이내로 정리 및 요약하라.
+답변은 절대 {4000/len(chunks)}자를 초과해선 안 된다.
+만일 해당 내용을 찾을 수 없다면, "(내용없음)" 이라고만 답하라.
+{chunk}
+요약: 
+            """
+            success = False
+            attempt = 0
+            while not success and attempt < max_retry:
+                conf_next()
+                try:
+                    response = await generate_content_timeout(prompt)
+                    summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
+                    all_summaries.append(summary)
+                    print(f"[DEBUG]: {idx + 1}: {summary}\n")
+                    await ctx.send(f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
+                    success = True
+                except Exception as e:
+                    if e is ResourceExhausted:
+                        err = "API 요청 과부하!"
+                    elif e is TimeoutError:
+                        err = "최종 요약 요청이 10초를 초과했습니다."
+                    else:
+                        err = str(e)
+                    await ctx.send(f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                    attempt += 1
+                    await asyncio.sleep(2)  # 잠시 대기 후 재시도
+            if not success:
+                await ctx.send(f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
+         # 최종 요약 요청
+        combined_summaries = " ".join(all_summaries)
+        await ctx.send(f"`최종 요약 진행 중...`")
+        final_prompt = f"""
+다음은 엄청 친한 찐친들의 Discord 채팅방에서
+다음과 같은 내용을 찾아 요약한 부분 요약들이다.
+사용자가 질의한 내용: {find}
+이 부분 요약들을 종합하여 사용자가 질의한 내용과 관련된 대화가 있다면,
+해당 내용과 관련한 전반적인 대화 흐름 및 주제, 자주 나오는 키워드,
+나눴던 대화 내용(대표적인 발화) 등을
+하나로 통합해서 최종 요약을 1200자 이내로 정리 및 요약하라.
+답변은 절대 1800자를 초과해선 안 된다.
+줄바꿈 혹은 마크다운 형식을 이용해 보기 편하게 정리하라.
+{combined_summaries}
+
+만일 해당 내용을 찾을 수 없다면, 
+"{date}에는 해당 내용으로 대화한 기록이 없어요!"
+라고만 답하라.
+
+최종 요약:
+        """
+        success = False
+        attempt = 0
+        while not success and attempt < max_retry:
+            conf_next()
+            try:
+                final_response = await generate_content_timeout(final_prompt)
+                final_summary = final_response.text if hasattr(final_response, 'text') else "최종 요약 실패."
+                if len(final_summary) > 2000:
+                    raise ValueError("최종 요약이 2000자를 초과했습니다.")
+                success = True
+            except Exception as e:
+                if e is ResourceExhausted:
+                    err = "API 요청 과부하!"
+                elif e is TimeoutError:
+                    err = "최종 요약 요청이 10초를 초과했습니다."
+                else:
+                    err = str(e)
+                await ctx.send(f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                attempt += 1
+                await asyncio.sleep(2)
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        await ctx.send(f"`{MODEL}: 찾기 소요 시간: {elapsed_time:.2f}s`")
+        await ctx.send(f"# {date}에 `{find}` 키워드와 관련된 내용들이에요!\n{final_summary}")
+
+    except Exception as e:
+        await ctx.send(f"요약 중 오류 발생: {str(e)}")
+
+
+
+
+
     
     
 @bot.command()
@@ -484,7 +856,7 @@ async def 후앰아이(ctx):
     await ctx.send(WHO_AM_I)
     t = "[DEBUG] 후앰아이 호출"
     print(t)
-    save__logs("Console", t)   
+    #save__logs("Console", t)   
     
 @bot.command()
 async def stop(ctx):
@@ -504,13 +876,14 @@ async def 질문(ctx, *, promft):
 정보를 요청하는 질문: {promft}
 
 답변: """)
+        conf_next()
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = response.text
         await ctx.send(reply_text)
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 명령어 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
-        save__logs("Console", console_log)
+        #save__logs("Console", console_log)
     except Exception as e:
         await ctx.send(f"잉! 잘못된 명령 발생! {str(e)}")
 
@@ -531,6 +904,7 @@ async def 알려줘(ctx, *, promft):
 정보를 요청하는 질문: {promft}
 
 답변: """)
+        conf_next()
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = response.text
         await ctx.send(reply_text)
@@ -540,7 +914,7 @@ async def 알려줘(ctx, *, promft):
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 정보 제공 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
-        save__logs("Console", console_log)
+        #save__logs("Console", console_log)
 
     except Exception as e:
         await ctx.send(f"잉! 잘못된 명령 발생! {str(e)}")
@@ -565,6 +939,7 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
 정보를 요청하는 질문: {promft}
 
 답변: """)
+        conf_next()
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = response.text
         await ctx.send(reply_text)
@@ -574,7 +949,7 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
-        save__logs("Console", console_log)
+        #save__logs("Console", console_log)
     except Exception as e:
         await ctx.send(f"잉! 잘못된 명령 발생! {str(e)}")
 
@@ -583,7 +958,7 @@ async def 패치노트(ctx):
     await ctx.send(PATCHNOTE)
     t = "[DEBUG] 패치노트 호출"
     print(t)
-    save__logs("Console", t)
+    #save__logs("Console", t)
 
 @bot.command()
 async def 언제와(ctx):
@@ -591,9 +966,21 @@ async def 언제와(ctx):
     t = f"최씨가 우리의 곁을 떠난 지 {e_time} 지났습니다...."
     await ctx.send(t)
     print(t)
-    save__logs("Console", t)
+    #save__logs("Console", t)
 
-    
+@bot.command()
+async def 유저(ctx, option: str = None, user_name: str = None):
+    if option is None:
+        await ctx.send(f"```{USER_MAP}```")
+    else:
+        await ctx.send("`잘못된 옵션입니다. !유저 help 명령어로 도움말을 확인하세요.`")
+    if option.lower() == "help":
+        help_msg = """
+        ```
+추가 예정입니다.
+```
+        """
+
 
 # 5️봇 실행 (Jupyter 관련 코드 없이 터미널 실행 가능)
 bot.run(DISCORD_BOT_TOKEN)
