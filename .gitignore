@@ -1,1 +1,3 @@
-ini.env
+*.env
+logs/
+logs_bak/
