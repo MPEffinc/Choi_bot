@@ -331,6 +331,11 @@ async def edit(interaction: discord.Interaction, content:str):
     else:
         await interaction.edit_original_response(content=content)
 
+
+async def loading(interaction: discord.Interaction):
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
 #최근 대화 내역 저장, 사용자 맥락
 def update_context(user, message):
     global last_conversation_time
@@ -600,6 +605,7 @@ async def 요약(interaction: discord.Interaction, date: str):
     if not os.path.exists(log_file):
         await send(interaction, "파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
         return
+    
     await send(interaction, f"`{MODEL}을 이용해 요약 중...`")
     try:
         pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
@@ -935,6 +941,7 @@ async def 자세히(interaction: discord.Interaction, *, promft: str):
     try: 
         start_time = time.time()
         save__logs("USER", promft)
+        load = await loading(interaction)
         await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = model.generate_content(f"""
 정보를 요청하는 질문에 대해 자세히 답변해줘.
@@ -956,7 +963,7 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await send(interaction, f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        load.edit(f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
