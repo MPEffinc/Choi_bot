@@ -16,7 +16,7 @@ import re
 #환경 변수 및 상수
 MAX_DIALOGS = 20 #대화 맥락 포함 이전 대화 수
 CONTEXT_EXPERATION = 120 #대화 맥락 유지 시간
-BUILD_VERSION = "1.7.0" #최씨 봇 버전
+BUILD_VERSION = "1.7.1" #최씨 봇 버전
 ALLOWED_CH = {1383015103926112296, 1348180197714821172, 0} #허용된 대화 채널 ID
 ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
 ANNOUNCEMENT_TIME = 21600 #공지 올릴 시간
@@ -99,6 +99,7 @@ PATCHNOTE = f"""
 - 최신 API를 활용한 다양한 기능 추가 예정입니다.
 ``` 수정 사항
 1. discord.app_commands 적용
+2. 적용 중 채팅 버그를 수정했습니다 (1.7.1)
 ```
 """
 
@@ -317,6 +318,19 @@ conversation_context = deque(maxlen=MAX_DIALOGS)
 #마지막 대화 시간 저장
 last_conversation_time = 0
 
+#채팅 메시지 보내기
+async def send(interaction: discord.Interaction, content:str, *, ephemeral: bool = False):
+    if not interaction.response.is_done():
+        await interaction.response.send_message(content, ephemeral=ephemeral)
+    else:
+        await interaction.channel.send(content)
+
+async def edit(interaction: discord.Interaction, content:str):
+    if not interaction.response.is_done():
+        await send(interaction, content)
+    else:
+        await interaction.edit_original_response(content=content)
+
 #최근 대화 내역 저장, 사용자 맥락
 def update_context(user, message):
     global last_conversation_time
@@ -366,6 +380,7 @@ def is_called(message:str):
 async def on_ready(): #Start client
     synced = await tree.sync()
     print(f"✅ 최씨 봇 준비 완료! {client.user}- 등록된 명령어 수: {len(synced)}")
+    await client.change_presence(activity=discord.Game("X스"))
     send_announcement.start()
     check_context.start()
 
@@ -405,14 +420,14 @@ async def before_announcement():
     """ 봇이 완전히 실행된 후 루프를 시작하도록 설정 """
     await client.wait_until_ready()
 
-@client.event #invalid commmand
-async def on_command_error(interaction: discord.Interaction, error):
-    if isinstance(error, app_commands.errors.CommandNotFound):
-        await interaction.response.send_message("잘못된 명령어입니다.")
+@tree.error #invalid commmand
+async def on_application_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.CommandInvokeError):
+        await send(interaction, "명령어가 올바르지 않거나, 오류가 발생했습니다.")
     if isinstance(error, app_commands.errors.MissingPermissions):
-        await interaction.response.send_message("`Permission Denied.`")
+        await send(interaction, "`Permission Denied.`")
     else:
-        await interaction.response.send_message("오류 발생.")
+        await send(interaction, "침입자 발견, 자가방어시스템을 가동합니다.")
 
 #답변 출력 함수
 async def reply(message, response):
@@ -445,7 +460,7 @@ async def reply(message, response):
 async def on_message(message):
     if message.author == client.user:
         return #ignore client message self
-
+    
     user = message.author.name
     save__logs(user, message.content)
     
@@ -513,7 +528,7 @@ async def on_message(message):
 
 @tree.command(name="test", description="test message.")
 async def test(interaction: discord.Interaction):
-    await interaction.response.send_message("Test Message")
+    await send(interaction, "Test Message")
 
 
 @tree.command(name="config", description="config settings")
@@ -526,36 +541,36 @@ async def config(interaction: discord.Interaction, command: str, value: str = No
     if command == "summary":
         if value == 'True':
             stopflag = 0
-            await interaction.response.send_message("`요약 기능 활성화`")
+            await send(interaction, "`요약 기능 활성화`")
             return
         elif value == 'False':
             stopflag = 1
-            await interaction.response.send_message("`요약 기능 비활성화`")
+            await send(interaction, "`요약 기능 비활성화`")
             return
         else: 
-            await interaction.response.send_message("`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
+            await send(interaction, "`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
         return
     elif command == "user":
         if value is None:
-            await interaction.response.send_message(f"```유저 ID 매핑 {USER_MAP}```")
+            await send(interaction, f"```유저 ID 매핑 {USER_MAP}```")
             return
         elif value in USER_MAP:
             if args == "delete":
                 del USER_MAP[value]
-                await interaction.response.send_message(f"`유저 ID 매핑 삭제: {value}`")
+                await send(interaction, f"`유저 ID 매핑 삭제: {value}`")
                 return
             if args is None:
-                await interaction.response.send_message(f"`User ID {value}의 이름: {USER_MAP[value]}`")
+                await send(interaction, f"`User ID {value}의 이름: {USER_MAP[value]}`")
                 return
             USER_MAP[value] = args
-            await interaction.response.send_message(f"`기존 유저 ID 매핑 업데이트: {value} -> {args}`")
+            await send(interaction, f"`기존 유저 ID 매핑 업데이트: {value} -> {args}`")
             return
         elif value not in USER_MAP and args != None:
             USER_MAP[value] = args
-            await interaction.response.send_message(f"`신규 유저 ID 매핑: {value} -> {args}`")
+            await send(interaction, f"`신규 유저 ID 매핑: {value} -> {args}`")
             return
         else:
-            await interaction.response.send_message("`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
+            await send(interaction, "`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
             return
 
     elif command == "help" or command == None:
@@ -567,9 +582,9 @@ async def config(interaction: discord.Interaction, command: str, value: str = No
 !config help : 이 도움말 메시지 표시
 ```
         """
-        await interaction.response.send_message(msg)
+        await send(interaction, msg)
         return
-    await interaction.response.send_message("`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
+    await send(interaction, "`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
     return
 
 @tree.command(name="요약", description="요약 `YYYY-MM-DD`로 해당 날짜 대화 로그를 분석해 요약해줍니다.")
@@ -578,14 +593,14 @@ async def config(interaction: discord.Interaction, command: str, value: str = No
 )
 async def 요약(interaction: discord.Interaction, date: str):
     if (stopflag == 1):
-        await interaction.response.send_message("API 요청 과부하로, 잠시 서비스를 중지합니다.")
+        await send(interaction, "API 요청 과부하로, 잠시 서비스를 중지합니다.")
         return
     start_time = time.time()
     log_file = os.path.join('logs', f"{date}.txt")
     if not os.path.exists(log_file):
-        await interaction.response.send_message("파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
+        await send(interaction, "파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
         return
-    await interaction.response.send_message(f"`{MODEL}을 이용해 요약 중...`")
+    await send(interaction, f"`{MODEL}을 이용해 요약 중...`")
     try:
         pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
         messages = []
@@ -601,17 +616,17 @@ async def 요약(interaction: discord.Interaction, date: str):
                     time_formatted = dt.strftime("%H:%M")
                     real_name = USER_MAP.get(user_id, user_id)
                     messages.append(f"[{time_formatted}] {real_name}: {message}")
-        await interaction.response.send_message(f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
+        await send(interaction, f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
         
         if not messages:
-            await interaction.response.send_message("파일에 분석할 내용이 없습니다.")
+            await send(interaction, "파일에 분석할 내용이 없습니다.")
             return
         
         combined_text = "\n".join(messages)
         chunk_size = 4000
         chunks = [combined_text[i:i + chunk_size] for i in range(0, len(combined_text), chunk_size)]
         
-        await interaction.response.send_message(f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
+        await send(interaction, f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
 
         all_summaries = []
         max_retry = len(API_KEYS)  # 최대 재시도 횟수는 API 키 개수로 설정
@@ -634,7 +649,7 @@ async def 요약(interaction: discord.Interaction, date: str):
                     summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
                     all_summaries.append(summary)
                     print(f"[DEBUG]: {idx + 1}: {summary}\n")
-                    await interaction.response.send_message(f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
+                    await send(interaction, f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
                     success = True
                 except Exception as e:
                     if e is ResourceExhausted:
@@ -643,13 +658,13 @@ async def 요약(interaction: discord.Interaction, date: str):
                         err = "요약 요청이 10초를 초과했습니다."
                     else:
                         err = str(e)
-                    await interaction.response.send_message(f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                    await send(interaction, f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
                     attempt += 1
                     await asyncio.sleep(2)  # 잠시 대기 후 재시도
             if not success:
-                await interaction.response.send_message(f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
+                await send(interaction, f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
          # 최종 요약 요청
-        await interaction.response.send_message(f"`최종 요약 진행 중...`")
+        await send(interaction, f"`최종 요약 진행 중...`")
         combined_summaries = " ".join(all_summaries)
         final_prompt = f"""
 다음은 Discord 대화 로그를 나눠 요약한 부분 요약들입니다. 
@@ -678,16 +693,16 @@ async def 요약(interaction: discord.Interaction, date: str):
                     err = "최종 요약 요청이 10초를 초과했습니다."
                 else:
                     err = str(e)
-                await interaction.response.send_message(f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                await send(interaction, f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
                 attempt += 1
                 await asyncio.sleep(2)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await interaction.response.send_message(f"`{MODEL}: 요약 소요 시간: {elapsed_time:.2f}s`")
-        await interaction.response.send_message(f"# {date}에는 이런 대화들을 나눴어요!\n{final_summary}")
+        await send(interaction, f"`{MODEL}: 요약 소요 시간: {elapsed_time:.2f}s`")
+        await send(interaction, f"# {date}에는 이런 대화들을 나눴어요!\n{final_summary}")
 
     except Exception as e:
-        await interaction.response.send_message(f"요약 중 오류 발생: {str(e)}")
+        await send(interaction, f"요약 중 오류 발생: {str(e)}")
 
 
 
@@ -699,18 +714,18 @@ async def 요약(interaction: discord.Interaction, date: str):
 )
 async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
     if (stopflag == 1):
-        await interaction.response.send_message("API 요청 과부하로, 잠시 서비스를 중지합니다.")
+        await send(interaction, "API 요청 과부하로, 잠시 서비스를 중지합니다.")
         return
     if find is None:
-        await interaction.response.send_message("찾고 싶은 내용을 입력해주세요. 예: `!찾기 YYYY-MM-DD 찾고 싶은 내용`")
+        await send(interaction, "찾고 싶은 내용을 입력해주세요. 예: `!찾기 YYYY-MM-DD 찾고 싶은 내용`")
         return
     
     start_time = time.time()
     log_file = os.path.join('logs', f"{date}.txt")
     if not os.path.exists(log_file):
-        await interaction.response.send_message("파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
+        await send(interaction, "파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
         return
-    await interaction.response.send_message(f"`{MODEL}을 이용해 찾는 중...`")
+    await send(interaction, f"`{MODEL}을 이용해 찾는 중...`")
     try:
         pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
         messages = []
@@ -726,17 +741,17 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
                     time_formatted = dt.strftime("%H:%M")
                     real_name = USER_MAP.get(user_id, user_id)
                     messages.append(f"[{time_formatted}] {real_name}: {message}")
-        await interaction.response.send_message(f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
+        await send(interaction, f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
         
         if not messages:
-            await interaction.response.send_message("파일에 분석할 내용이 없습니다.")
+            await send(interaction, "파일에 분석할 내용이 없습니다.")
             return
         
         combined_text = "\n".join(messages)
         chunk_size = 4000
         chunks = [combined_text[i:i + chunk_size] for i in range(0, len(combined_text), chunk_size)]
         
-        await interaction.response.send_message(f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
+        await send(interaction, f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
 
         all_summaries = []
         max_retry = len(API_KEYS)
@@ -764,7 +779,7 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
                     summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
                     all_summaries.append(summary)
                     print(f"[DEBUG]: {idx + 1}: {summary}\n")
-                    await interaction.response.send_message(f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
+                    await send(interaction, f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
                     success = True
                 except Exception as e:
                     if e is ResourceExhausted:
@@ -773,14 +788,14 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
                         err = "최종 요약 요청이 10초를 초과했습니다."
                     else:
                         err = str(e)
-                    await interaction.response.send_message(f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                    await send(interaction, f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
                     attempt += 1
                     await asyncio.sleep(2)  # 잠시 대기 후 재시도
             if not success:
-                await interaction.response.send_message(f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
+                await send(interaction, f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
          # 최종 요약 요청
         combined_summaries = " ".join(all_summaries)
-        await interaction.response.send_message(f"`최종 요약 진행 중...`")
+        await send(interaction, f"`최종 요약 진행 중...`")
         final_prompt = f"""
 다음은 엄청 친한 찐친들의 Discord 채팅방에서
 다음과 같은 내용을 찾아 요약한 부분 요약들이다.
@@ -816,16 +831,16 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
                     err = "최종 요약 요청이 10초를 초과했습니다."
                 else:
                     err = str(e)
-                await interaction.response.send_message(f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                await send(interaction, f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
                 attempt += 1
                 await asyncio.sleep(2)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await interaction.response.send_message(f"`{MODEL}: 찾기 소요 시간: {elapsed_time:.2f}s`")
-        await interaction.response.send_message(f"# {date}에 `{find}` 키워드와 관련된 내용들이에요!\n{final_summary}")
+        await send(interaction, f"`{MODEL}: 찾기 소요 시간: {elapsed_time:.2f}s`")
+        await send(interaction, f"# {date}에 `{find}` 키워드와 관련된 내용들이에요!\n{final_summary}")
 
     except Exception as e:
-        await interaction.response.send_message(f"요약 중 오류 발생: {str(e)}")
+        await send(interaction, f"요약 중 오류 발생: {str(e)}")
 
 
 
@@ -836,11 +851,11 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
 @tree.command(name="정보", description="봇 정보를 알려줍니다.")
 async def 정보(interaction: discord.Interaction):
     now = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S")
-    await interaction.response.send_message(INFORMATION)
+    await send(interaction, INFORMATION)
     
 @tree.command(name="후앰아이", description="sex")
 async def 후앰아이(interaction: discord.Interaction):
-    await interaction.response.send_message(WHO_AM_I)
+    await send(interaction, WHO_AM_I)
     t = "[DEBUG] 후앰아이 호출"
     print(t)
     #save__logs("Console", t)   
@@ -869,23 +884,23 @@ async def 질문(interaction: discord.Interaction, *, promft:str):
         conf_next()
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = response.text
-        await interaction.response.send_message(reply_text)
+        await send(interaction, reply_text)
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 명령어 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
     except Exception as e:
-        await interaction.response.send_message(f"잉! 잘못된 명령 발생! {str(e)}")
+        await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
 @tree.command(name="알려줘", description=f"조금 더 똑똑한 최씨가 {MODEL}을 사용해 답변합니다.")
 @app_commands.describe(
-    promft=f"질의에 대한 응답은 {model}이 담당합니다."
+    promft=f"질의에 대한 응답은 {MODEL}이 담당합니다."
 )
 async def 알려줘(interaction: discord.Interaction, *, promft: str):
     try: 
         start_time = time.time()
         save__logs("USER", promft)
-        await interaction.response.send_message(f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = model.generate_content(f"""
 이 질문에 한해, 다음 캐릭터 설정의 말투만 참고하여 정확한 정보를 제공해.
 캐릭터 설정:
@@ -900,27 +915,27 @@ async def 알려줘(interaction: discord.Interaction, *, promft: str):
         conf_next()
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = response.text
-        await interaction.response.send_message(reply_text)
+        await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await interaction.response.send_message(f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        await send(interaction, f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 정보 제공 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
 
     except Exception as e:
-        await interaction.response.send_message(f"잉! 잘못된 명령 발생! {str(e)}")
+        await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
 @tree.command(name="자세히", description=f"매우 똑똑한 최씨가 답변해줍니다. {MODEL}을 사용해서 말이죠...")
 @app_commands.describe(
-    promft=f"질문에 대해 {model}이 제공하는 아주 상세한 답변을 받을 수 있습니다."
+    promft=f"질문에 대해 {MODEL}이 제공하는 아주 상세한 답변을 받을 수 있습니다."
 )
 async def 자세히(interaction: discord.Interaction, *, promft: str):
     try: 
         start_time = time.time()
         save__logs("USER", promft)
-        await interaction.response.send_message(f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = model.generate_content(f"""
 정보를 요청하는 질문에 대해 자세히 답변해줘.
 단어인 경우 그 단어에 대해서 자세한 설명을 해줘.
@@ -938,20 +953,20 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
         conf_next()
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = response.text
-        await interaction.response.send_message(reply_text)
+        await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await interaction.response.send_message(f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        await send(interaction, f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
     except Exception as e:
-        await interaction.response.send_message(f"잉! 잘못된 명령 발생! {str(e)}")
+        await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
 @tree.command(name="패치노트", description=f"{BUILD_VERSION}의 최신 패치노트를 확인하세요!")
 async def 패치노트(interaction: discord.Interaction):
-    await interaction.response.send_message(PATCHNOTE)
+    await send(interaction, PATCHNOTE)
     t = "[DEBUG] 패치노트 호출"
     print(t)
     #save__logs("Console", t)
@@ -960,7 +975,7 @@ async def 패치노트(interaction: discord.Interaction):
 async def 언제와(interaction: discord.Interaction):
     e_time = time_since(DEP_TIME)
     t = f"최씨가 우리의 곁을 떠난 지 {e_time} 지났습니다...."
-    await interaction.response.send_message(t)
+    await send(interaction, t)
     print(t)
     #save__logs("Console", t)
 
@@ -970,9 +985,9 @@ async def 언제와(interaction: discord.Interaction):
 )
 async def 유저(interaction: discord.Interaction, option: str = None, user_name: str = None):
     if option is None:
-        await interaction.response.send_message(f"```{USER_MAP}```")
+        await send(interaction, f"```{USER_MAP}```")
     else:
-        await interaction.response.send_message("`잘못된 옵션입니다. !유저 help 명령어로 도움말을 확인하세요.`")
+        await send(interaction, "`잘못된 옵션입니다. !유저 help 명령어로 도움말을 확인하세요.`")
     if option.lower() == "help":
         help_msg = """
         ```
@@ -987,9 +1002,9 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
         message = "없음"
 
     if message == "help":
-        await interaction.response.send_message(f"{time} 메뉴 추천을 위한 명령어입니다. 사용법: `!점메추 <추천 요청사항>`")
+        await send(interaction, f"{time} 메뉴 추천을 위한 명령어입니다. 사용법: `!점메추 <추천 요청사항>`")
    
-    await interaction.response.send_message(f"`{MODEL}이 최적의 {time} 메뉴를 추천합니다...`")
+    await send(interaction, f"`{MODEL}이 최적의 {time} 메뉴를 추천합니다...`")
     try:
         response = model.generate_content(f"""
 너는 '무난하고 현실적인 {time} 메뉴'를 추천하는 AI야.
@@ -1032,10 +1047,10 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
 """)
         conf_next()
         if hasattr(final_reply, 'text'): final_reply = final_reply.text                                        
-        await interaction.response.send_message(final_reply)
+        await send(interaction, final_reply)
         save__logs("최씨 봇", final_reply)
     except Exception as e:
-        await interaction.response.send_message(f"잉! 잘못된 명령 발생! {str(e)}")
+        await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
 
 @tree.command(name="점메추", description="점심 메뉴가 고민이신가요? 최씨가 추천해드립니다!")
