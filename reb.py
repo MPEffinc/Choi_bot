@@ -16,9 +16,9 @@ import re
 #환경 변수 및 상수
 MAX_DIALOGS = 20 #대화 맥락 포함 이전 대화 수
 CONTEXT_EXPERATION = 120 #대화 맥락 유지 시간
-BUILD_VERSION = "1.7.0" #최씨 봇 버전
-ALLOWED_CH = {1383015103926112296, 1348180197714821172, 0} #허용된 대화 채널 ID
-ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
+BUILD_VERSION = "1.6.3" #최씨 봇 버전
+ALLOWED_CH = {1383015103926112296, 0} #허용된 대화 채널 ID
+ANNOUNCEMENT_CH = 1383015103926112296 #공지 올릴 대화 채널 ID
 ANNOUNCEMENT_TIME = 21600 #공지 올릴 시간
 CHECK_CONTEXT_TIME = 30 #맥락 체크 타이밍
 MODEL = "gemini-2.0-flash" #모델
@@ -64,42 +64,26 @@ USER_MAP = {
 }
 
 INFORMATION = f"""
-**:robot: 미래 가젯 최씨 봇(가칭) 버전:{BUILD_VERSION} Made by jhy.jng**
+**:roclient: Testclient 1.0 :{BUILD_VERSION}**
 ```
-제공되는 모든 답변은 Google Gemini 2.0에 기반합니다.
-Generative AI 기능 사용을 위해, 본 서버의 모든 대화 로그를 수집합니다.
-대화에 참여하면 User ID와 대화 내용을 수집하는 것에 동의한 것으로 간주됩니다.
+📏 빵점! 📏 마이너스! 📐✋지식은 척도이자, 진리를 파헤치고, 오류를 근절하지 
 📏 빵점! 📏 마이너스! 📐✋지식은 척도이자, 진리를 파헤치고, 오류를 근절하지
-봇 실행 시각: {now}
+📏 빵점! 📏 마이너스! 📐✋지식은 척도이자, 진리를 파헤치고, 오류를 근절하지
+📏 빵점! 📏 마이너스! 📐✋지식은 척도이자, 진리를 파헤치고, 오류를 근절하지
+📏 빵점! 📏 마이너스! 📐✋지식은 척도이자, 진리를 파헤치고, 오류를 근절하지
 Version: {BUILD_VERSION}```
 """
-WHO_AM_I = f"""
-# 최씨 (본명 최 영 원)
-- 나이: 85세 + a
-- 성별: 남성, ***GAY***
-- 본캐: 백전노장할아브, 버서커, 젤리젤리
-```
-자세한 내용은 위대한 젤리젤리 전설 참고.
-```
-## 인간관계
-- 남편: 김두멍
-- 아들: 박주녁
-- 친구: 마효중, 김민트, 지성게이, 저사구, 서민수, 조둥, 유링게슝, 메뚜기, 호영게이
-- 전우애: 박태민
-- 싸가지없는X: 문도
-- 유기: 성탄종
+WHO_AM_I = """
+sex
 """
 #패치노트 사항
 PATCHNOTE = f"""
-# 최씨 봇 {BUILD_VERSION} 버전 개발자 노트
-{BUILD_VERSION} 버전의 **주요 업데이트 사항**
-## 최신 API 지원
-- 이제 최씨 봇은, 최신 Discord API가 지원됩니다.
-- 명령어 자동완성 기능 등, 사용성이 개선되었습니다.
-- 최신 API를 활용한 다양한 기능 추가 예정입니다.
-``` 수정 사항
-1. discord.app_commands 적용
-```
+Patchnote test
+"""
+
+#명령어 리스트
+COMMAND_LIST = f"""
+Command List test
 """
 
 #캐릭터 프롬프트
@@ -308,6 +292,10 @@ def save__logs(user, msg):
         log_file.write(log_entry)
 
 
+
+
+
+
 #최근 대화 참여자 목록
 active_users = set()
 
@@ -364,7 +352,8 @@ def is_called(message:str):
 
 @client.event
 async def on_ready(): #Start client
-    synced = await tree.sync()
+    server_id = discord.Object(id=1277993256927498260)
+    synced = await tree.sync(guild=server_id)
     print(f"✅ 최씨 봇 준비 완료! {client.user}- 등록된 명령어 수: {len(synced)}")
     send_announcement.start()
     check_context.start()
@@ -406,13 +395,10 @@ async def before_announcement():
     await client.wait_until_ready()
 
 @client.event #invalid commmand
-async def on_command_error(interaction: discord.Interaction, error):
-    if isinstance(error, app_commands.errors.CommandNotFound):
-        await interaction.response.send_message("잘못된 명령어입니다.")
-    if isinstance(error, app_commands.errors.MissingPermissions):
-        await interaction.response.send_message("`Permission Denied.`")
-    else:
-        await interaction.response.send_message("오류 발생.")
+async def on_command_error(interaction, error):
+    if isinstance(error, commands.CommandNotFound):
+        await interaction.response.send_message("잘못된 명령어입니다. !help 명령어로 명령어 목록을 확인해주세요.")
+
 
 #답변 출력 함수
 async def reply(message, response):
@@ -510,14 +496,12 @@ async def on_message(message):
         return
 
 #Commands
-
 @tree.command(name="test", description="test message.")
 async def test(interaction: discord.Interaction):
     await interaction.response.send_message("Test Message")
 
 
 @tree.command(name="config", description="config settings")
-@app_commands.checks.has_permissions(administrator=True)
 async def config(interaction: discord.Interaction, command: str, value: str = None, args: str = None):
     global stopflag
     print(command)
@@ -573,9 +557,6 @@ async def config(interaction: discord.Interaction, command: str, value: str = No
     return
 
 @tree.command(name="요약", description="요약 `YYYY-MM-DD`로 해당 날짜 대화 로그를 분석해 요약해줍니다.")
-@app_commands.describe(
-    date="날짜 형식은 반드시 YYYY-MM-DD여야합니다."
-)
 async def 요약(interaction: discord.Interaction, date: str):
     if (stopflag == 1):
         await interaction.response.send_message("API 요청 과부하로, 잠시 서비스를 중지합니다.")
@@ -693,10 +674,6 @@ async def 요약(interaction: discord.Interaction, date: str):
 
 
 @tree.command(name="찾기", description="찾기 `YYYY-MM-DD` `찾을 내용`")
-@app_commands.describe(
-    date="날짜 형식은 반드시 YYYY-MM-DD여야합니다.",
-    find="검색어를 입력하세요."
-)
 async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
     if (stopflag == 1):
         await interaction.response.send_message("API 요청 과부하로, 잠시 서비스를 중지합니다.")
@@ -833,7 +810,7 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
 
     
     
-@tree.command(name="정보", description="봇 정보를 알려줍니다.")
+@tree.command(name="정보", description="봇 정보")
 async def 정보(interaction: discord.Interaction):
     now = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S")
     await interaction.response.send_message(INFORMATION)
@@ -845,15 +822,12 @@ async def 후앰아이(interaction: discord.Interaction):
     print(t)
     #save__logs("Console", t)   
     
-@tree.command(name="stop", description="대화 맥락을 강제로 중지합니다.")
+@tree.command(name="stop", description="context interrupt")
 async def stop(interaction: discord.Interaction):
     await clear_context("Interrupted")
     
 
-@tree.command(name="질문", description="멍청한 최씨가 답변을 진행합니다.")
-@app_commands.describe(
-    promft="최씨에게 하고 싶은 말이 있나요?"
-)
+@tree.command(name="질문", description="sex")
 async def 질문(interaction: discord.Interaction, *, promft:str):
     try: 
         save__logs("USER", promft)
@@ -877,10 +851,7 @@ async def 질문(interaction: discord.Interaction, *, promft:str):
     except Exception as e:
         await interaction.response.send_message(f"잉! 잘못된 명령 발생! {str(e)}")
 
-@tree.command(name="알려줘", description=f"조금 더 똑똑한 최씨가 {MODEL}을 사용해 답변합니다.")
-@app_commands.describe(
-    promft=f"질의에 대한 응답은 {model}이 담당합니다."
-)
+@tree.command()
 async def 알려줘(interaction: discord.Interaction, *, promft: str):
     try: 
         start_time = time.time()
@@ -912,10 +883,7 @@ async def 알려줘(interaction: discord.Interaction, *, promft: str):
     except Exception as e:
         await interaction.response.send_message(f"잉! 잘못된 명령 발생! {str(e)}")
 
-@tree.command(name="자세히", description=f"매우 똑똑한 최씨가 답변해줍니다. {MODEL}을 사용해서 말이죠...")
-@app_commands.describe(
-    promft=f"질문에 대해 {model}이 제공하는 아주 상세한 답변을 받을 수 있습니다."
-)
+@tree.command(name="자세히", description="sex")
 async def 자세히(interaction: discord.Interaction, *, promft: str):
     try: 
         start_time = time.time()
@@ -949,14 +917,14 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
     except Exception as e:
         await interaction.response.send_message(f"잉! 잘못된 명령 발생! {str(e)}")
 
-@tree.command(name="패치노트", description=f"{BUILD_VERSION}의 최신 패치노트를 확인하세요!")
+@tree.command(name="패치노트", description="sex")
 async def 패치노트(interaction: discord.Interaction):
     await interaction.response.send_message(PATCHNOTE)
     t = "[DEBUG] 패치노트 호출"
     print(t)
     #save__logs("Console", t)
 
-@tree.command(name="언제와", description="최씨가 언제 떠났을까요?")
+@tree.command(name="언제와", description="sex")
 async def 언제와(interaction: discord.Interaction):
     e_time = time_since(DEP_TIME)
     t = f"최씨가 우리의 곁을 떠난 지 {e_time} 지났습니다...."
@@ -964,10 +932,7 @@ async def 언제와(interaction: discord.Interaction):
     print(t)
     #save__logs("Console", t)
 
-@tree.command(name="유저", description="유저 이름 매핑 확인이 가능합니다.")
-@app_commands.describe(
-    option="미입력: 매핑 출력"
-)
+@tree.command(name="유저", description="sex")
 async def 유저(interaction: discord.Interaction, option: str = None, user_name: str = None):
     if option is None:
         await interaction.response.send_message(f"```{USER_MAP}```")
@@ -1038,18 +1003,12 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
         await interaction.response.send_message(f"잉! 잘못된 명령 발생! {str(e)}")
 
 
-@tree.command(name="점메추", description="점심 메뉴가 고민이신가요? 최씨가 추천해드립니다!")
-@app_commands.describe(
-    message="요청사항이 있으시면 추가로 적어주세요."
-)
+@tree.command(name="점메추", description="sex")
 async def 점메추(interaction: discord.Interaction, *, message: str = None):
     await menu_recommand(interaction, "점심", message)
 
 
-@tree.command(name="저메추", description="저녁 메뉴가 고민이신가요? 최씨가 추천해드립니다!")
-@app_commands.describe(
-    message="요청사항이 있으시면 추가로 적어주세요."
-)
+@tree.command(name="저메추", description="sex")
 async def 저메추(interaction: discord.Interaction, *, message: str = None):
     await menu_recommand(interaction, "저녁", message)
 
