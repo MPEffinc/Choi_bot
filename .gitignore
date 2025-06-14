@@ -1,3 +1,4 @@
 *.env
 logs/
 logs_bak/
+auto_restart.py
