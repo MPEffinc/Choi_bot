@@ -16,7 +16,7 @@ import re
 #환경 변수 및 상수
 MAX_DIALOGS = 20 #대화 맥락 포함 이전 대화 수
 CONTEXT_EXPERATION = 120 #대화 맥락 유지 시간
-BUILD_VERSION = "1.7.1" #최씨 봇 버전
+BUILD_VERSION = "1.7.3" #최씨 봇 버전
 ALLOWED_CH = {1383015103926112296, 1348180197714821172, 0} #허용된 대화 채널 ID
 ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
 ANNOUNCEMENT_TIME = 21600 #공지 올릴 시간
@@ -100,6 +100,8 @@ PATCHNOTE = f"""
 ``` 수정 사항
 1. discord.app_commands 적용
 2. 적용 중 채팅 버그를 수정했습니다 (1.7.1)
+3. 요약, 찾기 명령어 코드 리팩터링 (1.7.2)
+4. 버그 수정 (1.7.3)
 ```
 """
 
@@ -321,20 +323,24 @@ last_conversation_time = 0
 #채팅 메시지 보내기
 async def send(interaction: discord.Interaction, content:str, *, ephemeral: bool = False):
     if not interaction.response.is_done():
-        await interaction.response.send_message(content, ephemeral=ephemeral)
+        return await interaction.response.send_message(content, ephemeral=ephemeral)
     else:
-        await interaction.channel.send(content)
+        return await interaction.channel.send(content)
 
 async def edit(interaction: discord.Interaction, content:str):
     if not interaction.response.is_done():
-        await send(interaction, content)
+        return await send(interaction, content)
     else:
-        await interaction.edit_original_response(content=content)
+        return await interaction.edit_original_response(content=content)
 
 
-async def loading(interaction: discord.Interaction):
+async def loading(interaction: discord.Interaction, content:str = None):
     if not interaction.response.is_done():
-        await interaction.response.defer()
+        return await interaction.response.defer()
+    else: 
+        return await interaction.edit_original_response(content=content)
+
+
 
 #최근 대화 내역 저장, 사용자 맥락
 def update_context(user, message):
@@ -592,11 +598,10 @@ async def config(interaction: discord.Interaction, command: str, value: str = No
     await send(interaction, "`명령어 인수, 혹은 명령어가 잘못되었습니다. (Help to !config help)`")
     return
 
-@tree.command(name="요약", description="요약 `YYYY-MM-DD`로 해당 날짜 대화 로그를 분석해 요약해줍니다.")
-@app_commands.describe(
-    date="날짜 형식은 반드시 YYYY-MM-DD여야합니다."
-)
-async def 요약(interaction: discord.Interaction, date: str):
+async def summary(interaction: discord.Interaction, 
+                  date:str, 
+                  flag:int,
+                  find:str = None):
     if (stopflag == 1):
         await send(interaction, "API 요청 과부하로, 잠시 서비스를 중지합니다.")
         return
@@ -605,8 +610,8 @@ async def 요약(interaction: discord.Interaction, date: str):
     if not os.path.exists(log_file):
         await send(interaction, "파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
         return
-    
-    await send(interaction, f"`{MODEL}을 이용해 요약 중...`")
+    await loading(interaction)
+    notation = await send(interaction, f"`{MODEL}을 이용해 요약 중...`")
     try:
         pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
         messages = []
@@ -622,148 +627,33 @@ async def 요약(interaction: discord.Interaction, date: str):
                     time_formatted = dt.strftime("%H:%M")
                     real_name = USER_MAP.get(user_id, user_id)
                     messages.append(f"[{time_formatted}] {real_name}: {message}")
-        await send(interaction, f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
+        await notation.edit(content=f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
         
         if not messages:
-            await send(interaction, "파일에 분석할 내용이 없습니다.")
+            await loading(interaction, "파일에 분석할 내용이 없습니다.")
             return
         
         combined_text = "\n".join(messages)
         chunk_size = 4000
         chunks = [combined_text[i:i + chunk_size] for i in range(0, len(combined_text), chunk_size)]
         
-        await send(interaction, f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
+        await notation.edit(content=f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
 
         all_summaries = []
         max_retry = len(API_KEYS)  # 최대 재시도 횟수는 API 키 개수로 설정
 
         for idx, chunk in enumerate(chunks):
-            prompt = f"""
+            if flag == 0:
+                prompt = f"""
 다음은 엄청 친한 찐친들의 Discord 채팅방에서의 대화 로그 일부분이다.
 총 {len(chunks)}개의 로그 중, {idx+1}번째 로그이다.
 해당 내용을 요약해서 전반적인 대화 흐름 및 주제, 자주 나오는 키워드,
 나눴던 대화내용(대표적인 발화) 등을 {4000/len(chunks)}자 이내로 정리 및 요약하라.
 {chunk}
 요약: 
-            """
-            success = False
-            attempt = 0
-            while not success and attempt < max_retry:
-                conf_next()
-                try:
-                    response = await generate_content_timeout(prompt)
-                    summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
-                    all_summaries.append(summary)
-                    print(f"[DEBUG]: {idx + 1}: {summary}\n")
-                    await send(interaction, f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
-                    success = True
-                except Exception as e:
-                    if e is ResourceExhausted:
-                        err = "API 요청 과부하!"
-                    elif e is TimeoutError:
-                        err = "요약 요청이 10초를 초과했습니다."
-                    else:
-                        err = str(e)
-                    await send(interaction, f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
-                    attempt += 1
-                    await asyncio.sleep(2)  # 잠시 대기 후 재시도
-            if not success:
-                await send(interaction, f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
-         # 최종 요약 요청
-        await send(interaction, f"`최종 요약 진행 중...`")
-        combined_summaries = " ".join(all_summaries)
-        final_prompt = f"""
-다음은 Discord 대화 로그를 나눠 요약한 부분 요약들입니다. 
-이 부분 요약들을 종합하여 전반적인 대화 흐름 및 주제, 자주 나오는 키워드,
-나눴던 대화 내용(대표적인 발화) 등을 하나로 통합해서 최종 요약을 1500자 이내로 정리 및 요약하라.
-답변은 절대 2000자를 초과해선 안 된다.
-줄바꿈 혹은 마크다운 형식을 이용해 보기 편하게 정리하라.
-{combined_summaries}
-
-최종 요약:
-        """
-        success = False
-        attempt = 0
-        while not success and attempt < max_retry:
-            conf_next()
-            try:
-                final_response = await generate_content_timeout(final_prompt)
-                final_summary = final_response.text if hasattr(final_response, 'text') else "최종 요약 실패."
-                if len(final_summary) > 2000:
-                    raise ValueError("최종 요약이 2000자를 초과했습니다.")
-                success = True
-            except Exception as e:
-                if e is ResourceExhausted:
-                    err = "API 요청 과부하!"
-                elif e is TimeoutError:
-                    err = "최종 요약 요청이 10초를 초과했습니다."
-                else:
-                    err = str(e)
-                await send(interaction, f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
-                attempt += 1
-                await asyncio.sleep(2)
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        await send(interaction, f"`{MODEL}: 요약 소요 시간: {elapsed_time:.2f}s`")
-        await send(interaction, f"# {date}에는 이런 대화들을 나눴어요!\n{final_summary}")
-
-    except Exception as e:
-        await send(interaction, f"요약 중 오류 발생: {str(e)}")
-
-
-
-
-@tree.command(name="찾기", description="찾기 `YYYY-MM-DD` `찾을 내용`")
-@app_commands.describe(
-    date="날짜 형식은 반드시 YYYY-MM-DD여야합니다.",
-    find="검색어를 입력하세요."
-)
-async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
-    if (stopflag == 1):
-        await send(interaction, "API 요청 과부하로, 잠시 서비스를 중지합니다.")
-        return
-    if find is None:
-        await send(interaction, "찾고 싶은 내용을 입력해주세요. 예: `!찾기 YYYY-MM-DD 찾고 싶은 내용`")
-        return
-    
-    start_time = time.time()
-    log_file = os.path.join('logs', f"{date}.txt")
-    if not os.path.exists(log_file):
-        await send(interaction, "파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
-        return
-    await send(interaction, f"`{MODEL}을 이용해 찾는 중...`")
-    try:
-        pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
-        messages = []
-
-        with open(log_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                match = pattern.match(line)
-                if match:
-                    timestamp = match.group(1)
-                    user_id = match.group(2)
-                    message = match.group(3)
-                    dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                    time_formatted = dt.strftime("%H:%M")
-                    real_name = USER_MAP.get(user_id, user_id)
-                    messages.append(f"[{time_formatted}] {real_name}: {message}")
-        await send(interaction, f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
-        
-        if not messages:
-            await send(interaction, "파일에 분석할 내용이 없습니다.")
-            return
-        
-        combined_text = "\n".join(messages)
-        chunk_size = 4000
-        chunks = [combined_text[i:i + chunk_size] for i in range(0, len(combined_text), chunk_size)]
-        
-        await send(interaction, f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
-
-        all_summaries = []
-        max_retry = len(API_KEYS)
-
-        for idx, chunk in enumerate(chunks):
-            prompt = f"""
+"""
+            elif flag == 1:
+                prompt = f"""
 다음은 엄청 친한 찐친들의 Discord 채팅방에서의 대화 로그 일부분이다.
 총 {len(chunks)}개의 로그 중, {idx+1}번째 로그이다.
 사용자는 다음과 같은 내용을 찾기를 원하고 있다.
@@ -775,7 +665,7 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
 만일 해당 내용을 찾을 수 없다면, "(내용없음)" 이라고만 답하라.
 {chunk}
 요약: 
-            """
+"""
             success = False
             attempt = 0
             while not success and attempt < max_retry:
@@ -785,24 +675,36 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
                     summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
                     all_summaries.append(summary)
                     print(f"[DEBUG]: {idx + 1}: {summary}\n")
-                    await send(interaction, f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
+                    await notation.edit(content=f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
                     success = True
                 except Exception as e:
                     if e is ResourceExhausted:
                         err = "API 요청 과부하!"
                     elif e is TimeoutError:
-                        err = "최종 요약 요청이 10초를 초과했습니다."
+                        err = "요약 요청이 10초를 초과했습니다."
                     else:
                         err = str(e)
-                    await send(interaction, f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                    await notation.edit(content=f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
                     attempt += 1
                     await asyncio.sleep(2)  # 잠시 대기 후 재시도
             if not success:
-                await send(interaction, f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
+                await notation.edit(content=f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
          # 최종 요약 요청
+        await notation.edit(content=f"`최종 요약 진행 중...`")
         combined_summaries = " ".join(all_summaries)
-        await send(interaction, f"`최종 요약 진행 중...`")
-        final_prompt = f"""
+        if flag == 0:
+            final_prompt = f"""
+다음은 Discord 대화 로그를 나눠 요약한 부분 요약들입니다. 
+이 부분 요약들을 종합하여 전반적인 대화 흐름 및 주제, 자주 나오는 키워드,
+나눴던 대화 내용(대표적인 발화) 등을 하나로 통합해서 최종 요약을 1500자 이내로 정리 및 요약하라.
+답변은 절대 2000자를 초과해선 안 된다.
+줄바꿈 혹은 마크다운 형식을 이용해 보기 편하게 정리하라.
+{combined_summaries}
+
+최종 요약:
+"""
+        elif flag == 1:
+            final_prompt = f"""
 다음은 엄청 친한 찐친들의 Discord 채팅방에서
 다음과 같은 내용을 찾아 요약한 부분 요약들이다.
 사용자가 질의한 내용: {find}
@@ -819,7 +721,7 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
 라고만 답하라.
 
 최종 요약:
-        """
+"""
         success = False
         attempt = 0
         while not success and attempt < max_retry:
@@ -837,19 +739,38 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
                     err = "최종 요약 요청이 10초를 초과했습니다."
                 else:
                     err = str(e)
-                await send(interaction, f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
+                await notation.edit(content=f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
                 attempt += 1
                 await asyncio.sleep(2)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await send(interaction, f"`{MODEL}: 찾기 소요 시간: {elapsed_time:.2f}s`")
-        await send(interaction, f"# {date}에 `{find}` 키워드와 관련된 내용들이에요!\n{final_summary}")
+        await notation.edit(content=f"`{MODEL}: 요약 소요 시간: {elapsed_time:.2f}s`")
+        if flag == 0:
+            await loading(interaction, f"# {date}에는 이런 대화들을 나눴어요!\n{final_summary}")
+        elif flag == 1:
+            await loading(interaction, f"# {date}에 나눈 대화 중 `{find}`에 대한 검색 결과입니다.\n{final_summary}")
 
     except Exception as e:
-        await send(interaction, f"요약 중 오류 발생: {str(e)}")
+        await loading(interaction, f"요약 중 오류 발생: {str(e)}")
+
+
+@tree.command(name="요약", description="요약 `YYYY-MM-DD`로 해당 날짜 대화 로그를 분석해 요약해줍니다.")
+@app_commands.describe(
+    date="날짜 형식은 반드시 YYYY-MM-DD여야합니다."
+)
+async def 요약(interaction: discord.Interaction, date: str):
+    await summary(interaction, date, 0)
 
 
 
+
+@tree.command(name="찾기", description="찾기 `YYYY-MM-DD` `찾을 내용`")
+@app_commands.describe(
+    date="날짜 형식은 반드시 YYYY-MM-DD여야합니다.",
+    find="검색어를 입력하세요."
+)
+async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
+    await summary(interaction, date, 1, find)
 
 
     
@@ -906,7 +827,8 @@ async def 알려줘(interaction: discord.Interaction, *, promft: str):
     try: 
         start_time = time.time()
         save__logs("USER", promft)
-        await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        start = await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        await loading(interaction)
         response = model.generate_content(f"""
 이 질문에 한해, 다음 캐릭터 설정의 말투만 참고하여 정확한 정보를 제공해.
 캐릭터 설정:
@@ -924,7 +846,8 @@ async def 알려줘(interaction: discord.Interaction, *, promft: str):
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await send(interaction, f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        await loading(interaction, f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        await start.delete()
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 정보 제공 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
@@ -941,8 +864,8 @@ async def 자세히(interaction: discord.Interaction, *, promft: str):
     try: 
         start_time = time.time()
         save__logs("USER", promft)
-        load = await loading(interaction)
-        await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        await loading(interaction)
+        start = await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = model.generate_content(f"""
 정보를 요청하는 질문에 대해 자세히 답변해줘.
 단어인 경우 그 단어에 대해서 자세한 설명을 해줘.
@@ -963,7 +886,8 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        load.edit(f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        await start.delete()
+        await loading(interaction, f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {promft} 내용: {reply_text}"
         print(console_log)
@@ -1011,7 +935,9 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
     if message == "help":
         await send(interaction, f"{time} 메뉴 추천을 위한 명령어입니다. 사용법: `!점메추 <추천 요청사항>`")
    
-    await send(interaction, f"`{MODEL}이 최적의 {time} 메뉴를 추천합니다...`")
+    await loading(interaction)
+    notation = await send(interaction, f"`{MODEL}이 최적의 {time} 메뉴를 추천합니다...`")
+    
     try:
         response = model.generate_content(f"""
 너는 '무난하고 현실적인 {time} 메뉴'를 추천하는 AI야.
@@ -1043,8 +969,8 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
 {reply_text}
 상기 15개의 메뉴 추천 후보군 중 5개만 완전 무작위로 고르되,
 다음 요청사항이 있다면 최우선적으로 반영하여 골라.
-형식은 아래처럼 작성해. 불필요한 표현은 넣지 마.
 요청사항: {message}
+형식은 아래처럼 작성해. 불필요한 표현은 넣지 마.
 **{time}메뉴 추천**
 1. 메뉴명: 설명
 2. 메뉴명: 설명
@@ -1053,8 +979,9 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
 5. 메뉴명: 설명                                      
 """)
         conf_next()
-        if hasattr(final_reply, 'text'): final_reply = final_reply.text                                        
-        await send(interaction, final_reply)
+        if hasattr(final_reply, 'text'): final_reply = final_reply.text
+        await loading(interaction, final_reply)
+        await notation.delete()
         save__logs("최씨 봇", final_reply)
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
