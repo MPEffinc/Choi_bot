@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.ext import tasks
+from discord.ui import View, Button, Modal, TextInput, Select
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import os
@@ -16,7 +17,7 @@ import re
 #환경 변수 및 상수
 MAX_DIALOGS = 20 #대화 맥락 포함 이전 대화 수
 CONTEXT_EXPERATION = 120 #대화 맥락 유지 시간
-BUILD_VERSION = "1.7.3" #최씨 봇 버전
+BUILD_VERSION = "1.7.5" #최씨 봇 버전
 ALLOWED_CH = {1383015103926112296, 1348180197714821172, 0} #허용된 대화 채널 ID
 ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
 ANNOUNCEMENT_TIME = 21600 #공지 올릴 시간
@@ -97,11 +98,18 @@ PATCHNOTE = f"""
 - 이제 최씨 봇은, 최신 Discord API가 지원됩니다.
 - 명령어 자동완성 기능 등, 사용성이 개선되었습니다.
 - 최신 API를 활용한 다양한 기능 추가 예정입니다.
+## 번역기 기능 추가
+- 이제 최씨 봇 번역기를 이용할 수 있습니다.
+- `/번역` 명령어를 통해 번역기 UI를 띄울 수 있습니다
+- 언어를 먼저 선택한 후, 문장 입력 버튼을 누르면 제출란이 뜹니다.
+- 제출란에 번역할 문장을 넣고, 저장합니다.
+- 번역 버튼을 누르면 번역 결과를 출력해줍니다.
 ``` 수정 사항
 1. discord.app_commands 적용
 2. 적용 중 채팅 버그를 수정했습니다 (1.7.1)
 3. 요약, 찾기 명령어 코드 리팩터링 (1.7.2)
-4. 버그 수정 (1.7.3)
+4. 버그 수정 (1.7.4)
+5. 번역기 기능 추가 (1.7.5)
 ```
 """
 
@@ -321,11 +329,15 @@ conversation_context = deque(maxlen=MAX_DIALOGS)
 last_conversation_time = 0
 
 #채팅 메시지 보내기
-async def send(interaction: discord.Interaction, content:str, *, ephemeral: bool = False):
+async def send(interaction: discord.Interaction, 
+               content:str, *, 
+               ephemeral: bool = False,
+               view: discord.ui.View = None
+               ):
     if not interaction.response.is_done():
-        return await interaction.response.send_message(content, ephemeral=ephemeral)
+        return await interaction.response.send_message(content, ephemeral=ephemeral, view=view)
     else:
-        return await interaction.channel.send(content)
+        return await interaction.channel.send(content, view=view)
 
 async def edit(interaction: discord.Interaction, content:str):
     if not interaction.response.is_done():
@@ -334,9 +346,9 @@ async def edit(interaction: discord.Interaction, content:str):
         return await interaction.edit_original_response(content=content)
 
 
-async def loading(interaction: discord.Interaction, content:str = None):
+async def loading(interaction: discord.Interaction, content:str = None, thinking: bool = True):
     if not interaction.response.is_done():
-        return await interaction.response.defer()
+        return await interaction.response.defer(thinking=thinking)
     else: 
         return await interaction.edit_original_response(content=content)
 
@@ -439,6 +451,7 @@ async def on_application_command_error(interaction: discord.Interaction, error: 
         await send(interaction, "`Permission Denied.`")
     else:
         await send(interaction, "침입자 발견, 자가방어시스템을 가동합니다.")
+        print(str(error))
 
 #답변 출력 함수
 async def reply(message, response):
@@ -810,7 +823,7 @@ async def 질문(interaction: discord.Interaction, *, promft:str):
 답변: """)
         conf_next()
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = response.text
+        if hasattr(response, 'text'): reply_text = f"Q. {promft}\nA. {response.text}"
         await send(interaction, reply_text)
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 명령어 답변 생성됨. 질의: {promft} 내용: {reply_text}"
@@ -842,7 +855,7 @@ async def 알려줘(interaction: discord.Interaction, *, promft: str):
 답변: """)
         conf_next()
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = response.text
+        if hasattr(response, 'text'): reply_text = f"Q. {promft}\nA. {response.text}"
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -882,7 +895,7 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
 답변: """)
         conf_next()
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = response.text
+        if hasattr(response, 'text'): reply_text = f"Q. {promft}\nA. {response.text}"
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -1001,6 +1014,105 @@ async def 점메추(interaction: discord.Interaction, *, message: str = None):
 )
 async def 저메추(interaction: discord.Interaction, *, message: str = None):
     await menu_recommand(interaction, "저녁", message)
+
+
+
+class TranslateModal(Modal, title="번역할 문장을 입력하세요."):
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+        self.message_input = TextInput(
+            label="번역할 문장",
+            placeholder="번역할 문장을 입력하세요.",
+            style=discord.TextStyle.paragraph,
+            max_length=500
+        )
+        self.add_item(self.message_input)
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.callback(interaction, self.message_input.value)
+
+class TranslateView(View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.message = None
+        self.target_lang = None
+        
+        self.select = Select(
+            placeholder="번역할 언어를 선택하세요",
+            options=[
+                discord.SelectOption(label="한국어", value="한국어"),
+                discord.SelectOption(label="영어", value="영어"),
+                discord.SelectOption(label="중국어", value="중국어"),
+                discord.SelectOption(label="일본어", value="일본어"),
+            ]
+        )
+        self.select.callback = self.select_callback
+        self.add_item(self.select)
+
+        self.input_button = Button(label="문장 입력", style=discord.ButtonStyle.secondary)
+        self.input_button.callback = self.input_callback
+        self.add_item(self.input_button)
+
+        self.translate_button = Button(label="번역!", style=discord.ButtonStyle.success)
+        self.translate_button.callback = self.translate_callback
+        self.add_item(self.translate_button)
+
+    async def input_callback(self, interaction: discord.Interaction):
+        modal = TranslateModal(self.set_message)
+        await interaction.response.send_modal(modal)
+
+    async def set_message(self, interaction: discord.Interaction, message: str):
+        self.message = message
+        await loading(interaction, thinking=False)
+        # await send(interaction, f"문장 저장됨: {message}", ephemeral=True)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        self.target_lang = self.select.values[0]
+        await loading(interaction, thinking=False)
+        # await send(interaction, f"언어 선택됨 {self.select.values[0]}", ephemeral=True)
+
+    async def translate_callback(self, interaction: discord.Interaction):
+        if not self.message:
+            await send(interaction, "문장을 입력해주세요!", ephemeral=True)
+            return
+        if not self.target_lang:
+            await send(interaction, "언어를 선택해주세요!", ephemeral=True)
+            return
+        
+        prompt = f"""
+너는 번역기고, 이제부터 내가 준 문장에 대해 번역만을 출력해야돼.
+다음 문장의 언어가 무엇인지 판별하고, 해당 문장을 {self.target_lang}로 자연스럽게 번역해줘.
+번역할 문장: {self.message}
+다음 조건을 준수해.
+1. 언어 감지는 확실하게 하며, 언어가 감지되지 않거나 불확실하면 "언어 감지 실패!"만 출력
+2. 감지 언어와 번역 언어가 같으면 그냥 출력해.
+3. 목표 언어가 중국어라면, 번역된 문장 뒤에 한어병음을 괄호에 넣어 표기해줘.
+4. 목표 언어가 일본어라면, 문장 뒤에 히라가나로만 된 문장을 추가로 괄호에 넣어 표기해줘.
+5. 위 4개 상황이 아니라면, 자연스럽게 {self.target_lang}로 번역된 문장만을 출력해.
+"""
+        await loading(interaction)
+
+        try:
+            response = await generate_content_timeout(prompt)
+            result = response.text if hasattr(response, 'text') else "번역 실패!"
+            await loading(interaction, f"**원본 언어**: {self.message}\n**`{self.target_lang}`번역**: {result}")
+        except Exception as e:
+            await loading(interaction, f"칩임자 발견, 자가방어시스템을 가동합니다. {str(e)}")
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if hasattr(self, 'original_message'):
+            try:
+                await self.original_message.edit(content="`번역 세션 만료됨.`", view=self)
+            except Exception as e:
+                print(f"세션 종료 실패! {e}")
+
+@tree.command(name="번역", description="번역 기능입니다.")
+async def 번역(interaction: discord.Interaction):
+    view = TranslateView()
+    await send(interaction, "최씨 번역기입니다. \n언어 선택 후 문장 입력을 눌러 번역할 문장을 입력해주세요. \n그 후, 번역 버튼을 누르면 번역이 진행됩니다.", view=view)
+    view.original_message = await interaction.original_response()
 
 # 5️봇 실행 (Jupyter 관련 코드 없이 터미널 실행 가능)
 client.run(DISCORD_client_TOKEN)
