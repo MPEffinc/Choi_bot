@@ -17,16 +17,17 @@ import re
 #환경 변수 및 상수
 MAX_DIALOGS = 20 #대화 맥락 포함 이전 대화 수
 CONTEXT_EXPERATION = 120 #대화 맥락 유지 시간
-BUILD_VERSION = "1.7.5" #최씨 봇 버전
+BUILD_VERSION = "1.8.0" #최씨 봇 버전
 ALLOWED_CH = {1383015103926112296, 1348180197714821172, 0} #허용된 대화 채널 ID
 ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
-ANNOUNCEMENT_TIME = 21600 #공지 올릴 시간
+ANNOUNCEMENT_TIME = 43200 #공지 올릴 시간
 CHECK_CONTEXT_TIME = 30 #맥락 체크 타이밍
 MODEL = "gemini-2.0-flash" #모델
 now = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S") #현재시각
 KEY_WORDS = ["최씨", "영원"] #감지 키워드
 reset_flag = 0
 DEP_TIME = datetime(2025, 3, 4, 4, 30, 00) #최씨가 떠나간 시간
+RET_TIME = datetime(2025, 7, 15, 21, 57, 00) #최씨가 돌아온 시간
 #특정 날짜와 현재 시간까지 경과한 
 def time_since(event_time):
     nowtime = datetime.now()
@@ -38,6 +39,7 @@ def time_since(event_time):
 
     return f"{days}일 {hours}시간 {minutes}분 {seconds}초"
 leave_time = time_since(DEP_TIME)
+return_time = time_since(RET_TIME) 
 
 stopflag = 0 #API 요청 과부하로 중지 여부 (0: 재개, 1: 중지)
 
@@ -94,6 +96,8 @@ WHO_AM_I = f"""
 PATCHNOTE = f"""
 # 최씨 봇 {BUILD_VERSION} 버전 개발자 노트
 {BUILD_VERSION} 버전의 **주요 업데이트 사항**
+## Docker 환경으로 이전
+- 최씨 봇은 이제 Docker 환경에서 실행됩니다.
 ## 최신 API 지원
 - 이제 최씨 봇은, 최신 Discord API가 지원됩니다.
 - 명령어 자동완성 기능 등, 사용성이 개선되었습니다.
@@ -110,6 +114,7 @@ PATCHNOTE = f"""
 3. 요약, 찾기 명령어 코드 리팩터링 (1.7.2)
 4. 버그 수정 (1.7.4)
 5. 번역기 기능 추가 (1.7.5)
+6. Docker 환경으로 이전 (1.8.0)
 ```
 """
 
@@ -918,8 +923,10 @@ async def 패치노트(interaction: discord.Interaction):
 @tree.command(name="언제와", description="최씨가 언제 떠났을까요?")
 async def 언제와(interaction: discord.Interaction):
     e_time = time_since(DEP_TIME)
-    t = f"최씨가 우리의 곁을 떠난 지 {e_time} 지났습니다...."
-    await send(interaction, t)
+    r_time = time_since(RET_TIME)
+    t = f"최씨가 우리를 최초로 유기한 날로부터 {e_time} 지났습니다...."
+    t2 = f"최씨가 염치없게 돌아온 날로부터 {r_time} 지났습니다...."
+    await send(interaction, f"{t}\n{t2}")
     print(t)
     #save__logs("Console", t)
 
