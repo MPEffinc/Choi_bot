@@ -23,11 +23,15 @@ ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
 ANNOUNCEMENT_TIME = 43200 #공지 올릴 시간
 CHECK_CONTEXT_TIME = 30 #맥락 체크 타이밍
 MODEL = "gemini-2.0-flash" #모델
+MODEL2 = "gemini-2.5-flash" #모델2
 now = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S") #현재시각
 KEY_WORDS = ["최씨", "영원"] #감지 키워드
 reset_flag = 0
 DEP_TIME = datetime(2025, 3, 4, 4, 30, 00) #최씨가 떠나간 시간
 RET_TIME = datetime(2025, 7, 15, 21, 57, 00) #최씨가 돌아온 시간
+
+nowmodel = MODEL #현재 모델
+
 #특정 날짜와 현재 시간까지 경과한 
 def time_since(event_time):
     nowtime = datetime.now()
@@ -72,7 +76,6 @@ INFORMATION = f"""
 제공되는 모든 답변은 Google Gemini 2.0에 기반합니다.
 Generative AI 기능 사용을 위해, 본 서버의 모든 대화 로그를 수집합니다.
 대화에 참여하면 User ID와 대화 내용을 수집하는 것에 동의한 것으로 간주됩니다.
-📏 빵점! 📏 마이너스! 📐✋지식은 척도이자, 진리를 파헤치고, 오류를 근절하지
 봇 실행 시각: {now}
 Version: {BUILD_VERSION}```
 """
@@ -267,11 +270,17 @@ def get_next():
     return api_key
 
 # Google AI API 설정
-def conf_next():
+def conf_next(flag: int = 0):
     global call_count, model
     if call_count >= 5:
         genai.configure(api_key=get_next())
-        model = genai.GenerativeModel(MODEL)
+        global nowmodel
+        if flag == 0:
+            model = genai.GenerativeModel(MODEL)
+            nowmodel = MODEL
+        else:
+            model = genai.GenerativeModel(MODEL2)
+            nowmodel = MODEL2
         print(f"[DEBUG] API 키 변경됨: {current_api_index}번 키: {API_KEYS[current_api_index]}")
         call_count = 0
         return model
@@ -408,7 +417,7 @@ def is_called(message:str):
 async def on_ready(): #Start client
     synced = await tree.sync()
     print(f"✅ 최씨 봇 준비 완료! {client.user}- 등록된 명령어 수: {len(synced)}")
-    await client.change_presence(activity=discord.Game("X스"))
+    await client.change_presence(activity=discord.Game("작동"))
     send_announcement.start()
     check_context.start()
 
@@ -629,7 +638,7 @@ async def summary(interaction: discord.Interaction,
         await send(interaction, "파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
         return
     await loading(interaction)
-    notation = await send(interaction, f"`{MODEL}을 이용해 요약 중...`")
+    notation = await send(interaction, f"`{nowmodel}을 이용해 요약 중...`")
     try:
         pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
         messages = []
@@ -687,7 +696,7 @@ async def summary(interaction: discord.Interaction,
             success = False
             attempt = 0
             while not success and attempt < max_retry:
-                conf_next()
+                conf_next(1)
                 try:
                     response = await generate_content_timeout(prompt)
                     summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
@@ -743,7 +752,7 @@ async def summary(interaction: discord.Interaction,
         success = False
         attempt = 0
         while not success and attempt < max_retry:
-            conf_next()
+            conf_next(1)
             try:
                 final_response = await generate_content_timeout(final_prompt)
                 final_summary = final_response.text if hasattr(final_response, 'text') else "최종 요약 실패."
@@ -762,7 +771,7 @@ async def summary(interaction: discord.Interaction,
                 await asyncio.sleep(2)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await notation.edit(content=f"`{MODEL}: 요약 소요 시간: {elapsed_time:.2f}s`")
+        await notation.edit(content=f"`{nowmodel}: 요약 소요 시간: {elapsed_time:.2f}s`")
         if flag == 0:
             await loading(interaction, f"# {date}에는 이런 대화들을 나눴어요!\n{final_summary}")
         elif flag == 1:
@@ -812,40 +821,40 @@ async def stop(interaction: discord.Interaction):
 
 @tree.command(name="질문", description="멍청한 최씨가 답변을 진행합니다.")
 @app_commands.describe(
-    promft="최씨에게 하고 싶은 말이 있나요?"
+    prompt="최씨에게 하고 싶은 말이 있나요?"
 )
-async def 질문(interaction: discord.Interaction, *, promft:str):
+async def 질문(interaction: discord.Interaction, *, prompt:str):
     try: 
-        save__logs("USER", promft)
+        save__logs("USER", prompt)
         response = model.generate_content(f"""
 이 질문에 한해, 다음 캐릭터 설정의 말투만 참고하여 정확한 정보를 제공해.
 캐릭터 설정:
 {CHARACTER_PROMPT}
 이 요청에 대해서는 00100을 절대 포함해선 안 돼.
 다음 질문에 대해 짧게 정보를 제공해.
-정보를 요청하는 질문: {promft}
+정보를 요청하는 질문: {prompt}
 
 답변: """)
         conf_next()
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = f"Q. {promft}\nA. {response.text}"
+        if hasattr(response, 'text'): reply_text = f"Q. {prompt}\nA. {response.text}"
         await send(interaction, reply_text)
         save__logs("최씨 봇", reply_text)
-        console_log = f"[DEBUG] 명령어 답변 생성됨. 질의: {promft} 내용: {reply_text}"
+        console_log = f"[DEBUG] 명령어 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
-@tree.command(name="알려줘", description=f"조금 더 똑똑한 최씨가 {MODEL}을 사용해 답변합니다.")
+@tree.command(name="알려줘", description=f"조금 더 똑똑한 최씨가 {nowmodel}을 사용해 답변합니다.")
 @app_commands.describe(
-    promft=f"질의에 대한 응답은 {MODEL}이 담당합니다."
+    prompt=f"질의에 대한 응답은 {nowmodel}이 담당합니다."
 )
-async def 알려줘(interaction: discord.Interaction, *, promft: str):
+async def 알려줘(interaction: discord.Interaction, *, prompt: str):
     try: 
         start_time = time.time()
-        save__logs("USER", promft)
-        start = await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        save__logs("USER", prompt)
+        start = await send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         await loading(interaction)
         response = model.generate_content(f"""
 이 질문에 한해, 다음 캐릭터 설정의 말투만 참고하여 정확한 정보를 제공해.
@@ -855,35 +864,35 @@ async def 알려줘(interaction: discord.Interaction, *, promft: str):
 이 요청에 대해서는 단답형으로 굳이 말하지 않아도 돼.
 적당한 길이로 설명해도 되니까 정확한 정보 제공을 목적으로 해.
 너무 긴 정보는 최대 2줄까지 요약해.
-정보를 요청하는 질문: {promft}
+정보를 요청하는 질문: {prompt}
 
 답변: """)
         conf_next()
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = f"Q. {promft}\nA. {response.text}"
+        if hasattr(response, 'text'): reply_text = f"Q. {prompt}\nA. {response.text}"
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await loading(interaction, f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        await loading(interaction, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         await start.delete()
         save__logs("최씨 봇", reply_text)
-        console_log = f"[DEBUG] 정보 제공 답변 생성됨. 질의: {promft} 내용: {reply_text}"
+        console_log = f"[DEBUG] 정보 제공 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
 
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
-@tree.command(name="자세히", description=f"매우 똑똑한 최씨가 답변해줍니다. {MODEL}을 사용해서 말이죠...")
+@tree.command(name="자세히", description=f"매우 똑똑한 최씨가 답변해줍니다. {nowmodel}을 사용해서 말이죠...")
 @app_commands.describe(
-    promft=f"질문에 대해 {MODEL}이 제공하는 아주 상세한 답변을 받을 수 있습니다."
+    prompt=f"질문에 대해 {nowmodel}이 제공하는 아주 상세한 답변을 받을 수 있습니다."
 )
-async def 자세히(interaction: discord.Interaction, *, promft: str):
+async def 자세히(interaction: discord.Interaction, *, prompt: str):
     try: 
         start_time = time.time()
-        save__logs("USER", promft)
+        save__logs("USER", prompt)
         await loading(interaction)
-        start = await send(interaction, f"`{MODEL} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        start = await send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = model.generate_content(f"""
 정보를 요청하는 질문에 대해 자세히 답변해줘.
 단어인 경우 그 단어에 대해서 자세한 설명을 해줘.
@@ -895,19 +904,19 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
 만일 잘 모르거나 출처가 불분명한 정보라면 모르겠다고 해.
 출력 제한: 2000자 이내로 답변해
                               
-정보를 요청하는 질문: {promft}
+정보를 요청하는 질문: {prompt}
 
 답변: """)
-        conf_next()
+        conf_next(1)
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = f"Q. {promft}\nA. {response.text}"
+        if hasattr(response, 'text'): reply_text = f"Q. {prompt}\nA. {response.text}"
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
         await start.delete()
-        await loading(interaction, f"`{MODEL}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        await loading(interaction, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         save__logs("최씨 봇", reply_text)
-        console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {promft} 내용: {reply_text}"
+        console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
     except Exception as e:
@@ -956,7 +965,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
         await send(interaction, f"{time} 메뉴 추천을 위한 명령어입니다. 사용법: `!점메추 <추천 요청사항>`")
    
     await loading(interaction)
-    notation = await send(interaction, f"`{MODEL}이 최적의 {time} 메뉴를 추천합니다...`")
+    notation = await send(interaction, f"`{nowmodel}이 최적의 {time} 메뉴를 추천합니다...`")
     
     try:
         response = model.generate_content(f"""
@@ -980,7 +989,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
 (...)
 10. 후보군15: 설명
 """)
-        conf_next()
+        conf_next(1)
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = response.text
         print(f"[DEBUG] {reply_text}")
@@ -998,7 +1007,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
 4. 메뉴명: 설명 
 5. 메뉴명: 설명                                      
 """)
-        conf_next()
+        conf_next(1)
         if hasattr(final_reply, 'text'): final_reply = final_reply.text
         await loading(interaction, final_reply)
         await notation.delete()
@@ -1100,6 +1109,7 @@ class TranslateView(View):
         await loading(interaction)
 
         try:
+            conf_next(1)
             response = await generate_content_timeout(prompt)
             result = response.text if hasattr(response, 'text') else "번역 실패!"
             await loading(interaction, f"**원본 언어**: {self.message}\n**`{self.target_lang}`번역**: {result}")
