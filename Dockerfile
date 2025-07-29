@@ -18,4 +18,4 @@ COPY . .
 RUN mkdir -p logs
 
 #run bot
-CMD ["python", "choi_bot.py"]
+CMD ["python", "-u", "choi_bot.py"]

@@ -23,7 +23,6 @@ ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
 ANNOUNCEMENT_TIME = 43200 #공지 올릴 시간
 CHECK_CONTEXT_TIME = 30 #맥락 체크 타이밍
 MODEL = "gemini-2.0-flash" #모델
-MODEL2 = "gemini-2.5-flash" #모델2
 now = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S") #현재시각
 KEY_WORDS = ["최씨", "영원"] #감지 키워드
 reset_flag = 0
@@ -270,23 +269,18 @@ def get_next():
     return api_key
 
 # Google AI API 설정
-def conf_next(flag: int = 0):
+def conf_next():
     global call_count, model
     if call_count >= 5:
         genai.configure(api_key=get_next())
         global nowmodel
-        if flag == 0:
-            model = genai.GenerativeModel(MODEL)
-            nowmodel = MODEL
-        else:
-            model = genai.GenerativeModel(MODEL2)
-            nowmodel = MODEL2
+        model = genai.GenerativeModel(MODEL)
         print(f"[DEBUG] API 키 변경됨: {current_api_index}번 키: {API_KEYS[current_api_index]}")
         call_count = 0
         return model
     call_count += 1
 
-async def generate_content_timeout(prompt, timeout=10):
+async def generate_content_timeout(prompt, timeout=20):
     global model
     loop = asyncio.get_event_loop()
     try:
@@ -696,7 +690,7 @@ async def summary(interaction: discord.Interaction,
             success = False
             attempt = 0
             while not success and attempt < max_retry:
-                conf_next(1)
+                conf_next()
                 try:
                     response = await generate_content_timeout(prompt)
                     summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
@@ -752,7 +746,7 @@ async def summary(interaction: discord.Interaction,
         success = False
         attempt = 0
         while not success and attempt < max_retry:
-            conf_next(1)
+            conf_next()
             try:
                 final_response = await generate_content_timeout(final_prompt)
                 final_summary = final_response.text if hasattr(final_response, 'text') else "최종 요약 실패."
@@ -854,8 +848,8 @@ async def 알려줘(interaction: discord.Interaction, *, prompt: str):
     try: 
         start_time = time.time()
         save__logs("USER", prompt)
-        start = await send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         await loading(interaction)
+        start = await send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = model.generate_content(f"""
 이 질문에 한해, 다음 캐릭터 설정의 말투만 참고하여 정확한 정보를 제공해.
 캐릭터 설정:
@@ -907,7 +901,7 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
 정보를 요청하는 질문: {prompt}
 
 답변: """)
-        conf_next(1)
+        conf_next()
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = f"Q. {prompt}\nA. {response.text}"
         await send(interaction, reply_text)
@@ -989,7 +983,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
 (...)
 10. 후보군15: 설명
 """)
-        conf_next(1)
+        conf_next()
         reply_text = "응애! 대답할 수 없음!"
         if hasattr(response, 'text'): reply_text = response.text
         print(f"[DEBUG] {reply_text}")
@@ -1007,7 +1001,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
 4. 메뉴명: 설명 
 5. 메뉴명: 설명                                      
 """)
-        conf_next(1)
+        conf_next()
         if hasattr(final_reply, 'text'): final_reply = final_reply.text
         await loading(interaction, final_reply)
         await notation.delete()
@@ -1109,7 +1103,7 @@ class TranslateView(View):
         await loading(interaction)
 
         try:
-            conf_next(1)
+            conf_next()
             response = await generate_content_timeout(prompt)
             result = response.text if hasattr(response, 'text') else "번역 실패!"
             await loading(interaction, f"**원본 언어**: {self.message}\n**`{self.target_lang}`번역**: {result}")
