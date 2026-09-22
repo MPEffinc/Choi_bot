@@ -16,6 +16,8 @@ from bot.llm.router import LLMRouter, task_policies
 from tests.fakes import FakeProvider, FakeClient, FakeChannel, FakeInteraction
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_REVISION = json.loads((ROOT / 'tests/fixtures/legacy_contract.json')
+                             .read_text(encoding='utf-8'))['legacy_prompt_revision']
 
 # Verbatim excerpts of the operational role-play setting that must survive Phase 1C.
 PRESERVED_BACKGROUND = [
@@ -262,9 +264,13 @@ class EvaluationCaseTests(unittest.TestCase):
 
 
 def _legacy_character_prompt():
-    """The Phase 1B CHARACTER_PROMPT, read from git so no stale copy is kept here."""
+    """The pre-Phase-1C CHARACTER_PROMPT, read from git so no stale copy lives here.
+
+    Pinned to the Phase 1B revision, not HEAD: once Phase 1C is committed HEAD no
+    longer holds the prompt this comparison is against.
+    """
     import subprocess
-    source = subprocess.run(['git', 'show', 'HEAD:choi_bot.py'], cwd=ROOT,
+    source = subprocess.run(['git', 'show', f'{LEGACY_REVISION}:choi_bot.py'], cwd=ROOT,
                             capture_output=True, text=True, check=True).stdout
     start = source.index('CHARACTER_PROMPT = """') + len('CHARACTER_PROMPT = """')
     return source[start:source.index('"""', start)].replace('\r\n', '\n')

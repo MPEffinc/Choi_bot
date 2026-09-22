@@ -1,5 +1,6 @@
 {
   "baseline": "66ecf42dce1894868b98ab59b716899dd8cd9aba",
+  "legacy_prompt_revision": "443fa8cb76cc84bd9b0169dae00beba21917f645",
   "commands": [
     {
       "function": "test",

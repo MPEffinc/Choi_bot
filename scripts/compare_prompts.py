@@ -28,6 +28,10 @@ sys.path.insert(0, str(ROOT))
 from bot import persona  # noqa: E402
 
 CASES = json.loads((ROOT / 'tests/fixtures/style_eval_cases.json').read_text(encoding='utf-8'))['cases']
+# The Phase 1B commit that still carries the old prompt and the old chat template;
+# HEAD no longer has either.
+BASELINE = json.loads((ROOT / 'tests/fixtures/legacy_contract.json')
+                      .read_text(encoding='utf-8'))['legacy_prompt_revision']
 
 
 def legacy_templates(revision):
@@ -145,7 +149,7 @@ async def live(revision, selected):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--revision', default='HEAD', help='git revision holding the legacy prompt')
+    parser.add_argument('--revision', default=BASELINE, help='git revision holding the legacy prompt')
     parser.add_argument('--case', nargs='*', help='case ids to compare (default: all)')
     parser.add_argument('--show', action='store_true', help='print the full prompt text')
     parser.add_argument('--live', action='store_true', help='call the real model for both prompts')
