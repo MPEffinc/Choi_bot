@@ -53,10 +53,14 @@ class PersonaCompositionTests(unittest.TestCase):
         for name in names:
             self.assertTrue(getattr(persona, name).strip(), name)
         for section in (persona.IDENTITY, persona.SPEECH, persona.INTERACTION,
-                        persona.LENGTH, persona.CONTROL, persona.BACKGROUND):
+                        persona.LENGTH, persona.CONTROL, persona.BACKGROUND,
+                        persona.EXAMPLES):
             self.assertIn(section, persona.CHARACTER_PROMPT)
-        # Commands compose a different set; they never carry the control signals.
+        # Commands compose a different set; they never carry the control signals,
+        # and never the chat-length few-shot replies.
         self.assertNotIn(persona.CONTROL, persona.COMMAND_PERSONA)
+        self.assertNotIn(persona.EXAMPLES, persona.COMMAND_PERSONA)
+        self.assertNotIn(persona.EXAMPLES, persona.VOICE_ONLY)
         self.assertNotIn(persona.INTERACTION, persona.VOICE_ONLY)
 
     def test_tone_rules_replace_the_old_contradictory_ones(self):
@@ -67,13 +71,56 @@ class PersonaCompositionTests(unittest.TestCase):
             self.assertNotIn(stale, persona.CHARACTER_PROMPT)
             self.assertNotIn(stale, persona.COMMAND_PERSONA)
         self.assertIn('평소 말투 3 : 장난식 말투 7', persona.SPEECH)
-        self.assertIn('음슴체(~임, ~음, ~했음)만 반복하지 않는다', persona.SPEECH)
+        self.assertIn('반말, 존댓말, 음슴체를 섞어 사용한다', persona.SPEECH)
 
     def test_intended_verbal_habits_are_kept(self):
-        for habit in ('잉', '힝', '뀨', '헤에', '야다', '아뇨아뇨', '~데숑', '~구만', 'ㅋㅋㅋ'):
+        for habit in ('잉', '힝', '뀨', '헤에', '야다', '아뇨아뇨', '~인데숑', '~구만', 'ㅋㅋㅋ'):
             self.assertIn(habit, persona.CHARACTER_PROMPT, habit)
         # 힝/뀨 are absent from the source logs but are a deliberate character trait.
         self.assertIn('힝과 뀨는 실제 로그에서의 등장 여부와 무관하게', persona.SPEECH)
+
+    def test_reactions_are_driven_by_the_message_not_by_the_setting(self):
+        # Phase 1D: the bot volunteered relationship trivia on a bare call and
+        # narrated the user's state. Both are now ruled out explicitly.
+        self.assertIn('아무 이유 없이 상대의 특징을 꺼내 놀리거나', persona.SPEECH)
+        self.assertIn('상대의 심리와 상황을 멋대로 해석하지 않는다', persona.SPEECH)
+        self.assertIn('상대가 등장할 때마다 관계 설정의 특징을 반드시 언급해야 하는 것은 아니다',
+                      persona.INTERACTION)
+        self.assertIn('무조건 훈계하거나 그 사람의 성격·심리·상황을 분석하지 않는다', persona.INTERACTION)
+        self.assertIn('평범한 호출에는 짧게 반응한다', persona.INTERACTION)
+        self.assertIn('상대가 한마디만 했다면 굳이 두세 문장으로 확장하지 않는다', persona.LENGTH)
+        # Safety boundary survives the simplification.
+        self.assertIn('욕설, 혐오, 장애 비하, 성적 대상화는 생성하지 않는다', persona.INTERACTION)
+
+    def test_repeating_a_verbal_habit_is_allowed_again(self):
+        # Forcing a different 어미 every turn read as unnatural; only empty
+        # repetition of the previous answer is still discouraged.
+        self.assertIn('같은 감탄사나 말끝을 연속해서 사용하는 것도', persona.SPEECH)
+        self.assertIn('앞선 답변과 똑같은 내용을 의미 없이 반복하지 않는다', persona.SPEECH)
+        prompt = persona.build_conversation_prompt(['A: 앞선 말'], 'A', 'x', new_conversation=False)
+        self.assertNotIn('이전 답변에서 쓴 어미나 감탄사를 그대로 다시 쓰지 않는다', prompt)
+        # Reusing a 어미 is fine; copying a whole clause from the last answer is not.
+        self.assertIn('감탄사나 말끝은 다시 써도 되지만', prompt)
+        self.assertIn('직전 답변에 쓴 문구를 그대로 다시 붙이지 않는다', prompt)
+
+    def test_examples_separate_invented_material_from_real_log(self):
+        invented, real = persona.EXAMPLES.split('2) 실제 로그에서 발췌한 최씨의 발언')
+        self.assertIn('실제 로그 아님', invented)
+        self.assertIn('나눠 보낸 메시지는 한 줄로 합침', real)
+        self.assertIn('문장을 그대로 외워서 반복하지 않는다', persona.EXAMPLES)
+        # Short reactions are the point of the few-shot block.
+        self.assertIn('최씨: ㅖ?', invented)
+        self.assertIn('(마이크 끄는 소리)', invented)
+
+    def test_real_log_examples_are_traceable_to_the_analysis(self):
+        analysis = (ROOT / 'docs/CHARACTER_STYLE_ANALYSIS.md').read_text(encoding='utf-8')
+        _, real = persona.EXAMPLES.split('2) 실제 로그에서 발췌한 최씨의 발언')
+        quoted = [l.split(':', 1)[1].strip() for l in real.splitlines() if l.startswith('최씨:')]
+        self.assertGreaterEqual(len(quoted), 5)
+        for line in quoted:
+            # Multi-message turns were merged with a space; each part must be real.
+            for part in line.split(' '):
+                self.assertIn(part, analysis, f'{part!r} is not in the source analysis')
 
     def test_control_signals_match_the_runtime_exactly(self):
         for signal in ('00100, 관계성 부족', '00100, 다음 답변과 연계', '00100, 의미 없음'):

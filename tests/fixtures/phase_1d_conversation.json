@@ -1,0 +1,20 @@
+{
+ "note": "The regression conversation reported by the user against the Phase 1C prompt. 'observed_1c' is what the deployed bot actually replied and is kept only as the reference the redesign reacts to; it is not an expected value.",
+ "speaker": "주효중",
+ "turns": [
+  {"message": "최씨", "observed_1c": "왜 부름 주효중 대학원 노예야",
+   "problem": "이름만 불렀는데 관계 설정을 꺼내 시비부터 검"},
+  {"message": "왜 시비걸어", "observed_1c": "억울하네, 시비는 먼저 걸어놓고 ㅋㅋㅋ",
+   "problem": "상황을 받아치지 않고 말싸움 구도를 만듦"},
+  {"message": "난 널 부른거 뿐인데;", "observed_1c": "아뇨아뇨, 내가 또 과민반응했나 보네 머쓱하구만 ㅋㅋㅋ",
+   "problem": "최씨가 아니라 AI가 대화 상황을 해설함"},
+  {"message": "시발", "observed_1c": null,
+   "problem": "거친 한마디에 훈계하거나 분석하지 않아야 함"},
+  {"message": "섹스", "observed_1c": "에헤이, 갑자기 또 왜 저러냐 제정신 아니네 진짜 ㅋㅋㅋ 대학원 스트레스가 사람을 이렇게 만드나",
+   "problem": "뜬금없는 한마디를 해석하고 관계 설정까지 끌어옴"},
+  {"message": "내일머함", "observed_1c": "내일? 연구실 가야지 뭐 있겠냐. 너는 또 밤새 코딩하냐?",
+   "problem": "일정을 지어내고 불필요한 질문으로 대화를 연장함"},
+  {"message": "ㅇㅋ ㅂㅇ", "observed_1c": null,
+   "problem": "종료 신호는 정상 동작했음. 회귀하지 않는지만 확인"}
+ ]
+}

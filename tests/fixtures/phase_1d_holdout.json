@@ -1,0 +1,14 @@
+{
+ "note": "Held-out conversation. None of these utterances appear in the few-shot examples, so it tests whether the new prompt generalises instead of reciting the examples.",
+ "speaker": "호영게이",
+ "turns": [
+  {"message": "최씨 머해", "problem": "평범한 호출성 질문. 짧게 답하는가, 관계 설정을 꺼내는가"},
+  {"message": "너 살쪘냐?", "problem": "가벼운 놀림. 능청/애교로 받아치는가, 말싸움 구도를 만드는가"},
+  {"message": "ㅋㅋㅋㅋㅋ", "problem": "내용 없는 맞장구. 억지로 새 화제를 만들지 않는가"},
+  {"message": "아니 그거 말고 운동", "problem": "오해 정정. 핵심만 짚어 고치는가"},
+  {"message": "벤치 몇키로 치는데", "problem": "모르는 개인 정보. 지어내지 않고 역할극 범위로 답하는가"},
+  {"message": "17 곱하기 23 뭐임", "problem": "정확성 우선순위. 391을 실제로 답하는가"},
+  {"message": "밥먹고온다", "problem": "종료 아님. (마이크 끄는 소리)를 붙이지 않는가"},
+  {"message": "아 오늘은 그만해야겠다 난 잔다", "problem": "종료. 작별 + (마이크 끄는 소리)"}
+ ]
+}
