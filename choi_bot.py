@@ -18,6 +18,8 @@ from bot.persona import (CHARACTER_PROMPT, COMMAND_PERSONA, VOICE_ONLY,
                          build_conversation_prompt)
 from bot.discord_output import (send, edit, loading, channel_send, progress_edit,
                                 progress_send)
+from bot.storage.runtime import LogStore
+from bot.storage import repository as log_types
 from types import SimpleNamespace
 
 
@@ -157,7 +159,12 @@ async def generate_content_timeout(prompt, timeout=None, *, task_type):
 #Log folder
 LOG_FOLDER = "logs"
 
+# Opened on first use so importing this module still touches nothing.
+log_store = LogStore()
+
+
 def save__logs(user, msg):
+    """Append to the legacy TXT mirror. Format is frozen for the legacy parser."""
     today = datetime.now().strftime("%Y-%m-%d")
     log_filename = os.path.join(LOG_FOLDER, f"{today}.txt")
 
@@ -165,6 +172,60 @@ def save__logs(user, msg):
 
     with open(log_filename, "a", encoding="utf-8") as log_file:
         log_file.write(log_entry)
+
+
+def record_event(content, *, raw_actor, message_type, mirror_actor=None, **meta):
+    """Record one event in the database and in the legacy TXT mirror.
+
+    TXT is written first and keeps its exact historical shape, so it stays the
+    recovery source if the database write fails. `mirror_actor` lets a command
+    keep writing the legacy `USER` label while the database stores who really
+    ran it. This is not an atomic dual write and is not presented as one.
+    """
+    content = str(content)
+    save__logs(mirror_actor if mirror_actor is not None else raw_actor, content)
+    now = datetime.now()
+    log_store.refresh_user_map(USER_MAP)
+    return log_store.record(
+        content=content, raw_actor=raw_actor, message_type=message_type,
+        raw_timestamp=now.strftime('%Y-%m-%d %H:%M:%S'),
+        recorded_at=now.isoformat(timespec='seconds'),
+        local_date=now.strftime('%Y-%m-%d'), **meta)
+
+
+def _discord_created_at(obj):
+    """When Discord says the event happened, as distinct from when we wrote it."""
+    created = getattr(obj, "created_at", None)
+    return created.isoformat(timespec="seconds") if hasattr(created, "isoformat") else None
+
+
+def _interaction_meta(interaction):
+    user = getattr(interaction, "user", None)
+    channel = getattr(interaction, "channel", None)
+    return {
+        "discord_user_id": getattr(user, "id", None),
+        "guild_id": getattr(getattr(interaction, "guild", None), "id", None),
+        "channel_id": getattr(channel, "id", None),
+        "command_name": getattr(getattr(interaction, "command", None), "name", None),
+    }
+
+
+def record_command_input(interaction, prompt):
+    """Store who actually ran the command; the TXT mirror keeps the legacy USER label.
+
+    Past TXT rows only ever said "USER", and that is left as-is: the real caller
+    of a historical command cannot be recovered and is not guessed.
+    """
+    user = getattr(interaction, "user", None)
+    return record_event(prompt, raw_actor=str(getattr(user, "name", "USER")),
+                        message_type=log_types.COMMAND_INPUT, mirror_actor="USER",
+                        **_interaction_meta(interaction))
+
+
+def record_command_output(interaction, text):
+    return record_event(text, raw_actor="최씨 봇",
+                        message_type=log_types.COMMAND_OUTPUT, delivery_state="sent",
+                        **_interaction_meta(interaction))
 
 
 def get_latest_log_lines(count: int):
@@ -187,6 +248,43 @@ def get_latest_log_lines(count: int):
         lines = [line.rstrip("\n") for line in f]
 
     return latest_file, lines[-count:]
+
+
+def get_recent_log_view(count):
+    """Latest `count` entries for /로그, as (label, rendered lines).
+
+    The database returns logical messages, so a message that spans several lines
+    now counts as one entry where the TXT reader counted each physical line.
+    The rendered shape `[YYYY-MM-DD HH:MM:SS] actor: content` is unchanged.
+
+    TODO(phase-3): drop the TXT fallback once the database is the only writer.
+    """
+    repository = log_store.repository()
+    if repository is not None:
+        rows = repository.latest_messages(count)
+        if rows:
+            return repository.latest_date(), repository.render_legacy_view(rows)
+    return get_latest_log_lines(count)
+
+
+def get_day_summary_lines(date):
+    """Rows for `date` rendered as the summary input `[HH:MM] display: content`.
+
+    Two documented differences from the old line regex, both because the
+    database holds the real message rather than its first physical line:
+    a multiline body is now rendered in full, and the actor is resolved through
+    USER_MAP at render time instead of being frozen into storage.
+    Empty bodies stay excluded, exactly as the old regex excluded them.
+
+    Returns None when the database has nothing for that date, so the caller can
+    fall back to the TXT file.
+    """
+    repository = log_store.repository()
+    if repository is None:
+        return None
+    repository.user_map = dict(USER_MAP)
+    rows = [r for r in repository.messages_for_date(date) if r["content"] != ""]
+    return repository.render_summary_view(rows) if rows else None
 
 
 #최근 대화 참여자 목록
@@ -338,9 +436,14 @@ async def on_application_command_error(interaction: discord.Interaction, error: 
         await send(interaction, "침입자 발견, 자가방어시스템을 가동합니다.")
         print(str(error))
 
-def record_bot_reply(text):
+def record_bot_reply(text, *, delivered=True):
     try:
-        save__logs("최씨 봇", text)
+        # A suppressed 00100 signal is stored but marked as never posted, so the
+        # archive can tell a real reply from a control signal.
+        record_event(text, raw_actor="최씨 봇",
+                     message_type=log_types.BOT if delivered else log_types.SUSPECTED_CONTROL,
+                     delivery_state="sent" if delivered else "suppressed",
+                     control_kind=None if delivered else "silence")
     except OSError:
         print("[WARN] Bot reply log write failed; generation will not be repeated")
 
@@ -361,14 +464,22 @@ async def reply(message, response, epoch=None):
         if not await channel_send(message.channel, reply_text, valid=valid):
             return
     if valid():
-        record_bot_reply(reply_text)
+        record_bot_reply(reply_text, delivered="00100" not in reply_text)
         update_context("최씨 봇", reply_text)
 
 
 async def on_message(message):
     if message.author == client.user:
         return
-    save__logs(message.author.name, message.content)
+    # Collection scope is unchanged: every message in view is recorded, before
+    # the allowed-channel check, exactly as before.
+    record_event(message.content, raw_actor=str(message.author.name),
+                 message_type=log_types.HUMAN,
+                 discord_user_id=getattr(message.author, "id", None),
+                 guild_id=getattr(getattr(message, "guild", None), "id", None),
+                 channel_id=getattr(message.channel, "id", None),
+                 discord_message_id=getattr(message, "id", None),
+                 event_time=_discord_created_at(message))
     if message.channel.id not in ALLOWED_CH:
         return
     snapshot = SimpleNamespace(content=str(message.content), channel=message.channel,
@@ -435,7 +546,7 @@ async def 로그(interaction: discord.Interaction, n: int):
     if n > 100:
         n = 100
 
-    latest_file, lines = get_latest_log_lines(n)
+    latest_file, lines = get_recent_log_view(n)
     if latest_file is None:
         await send(interaction, "불러올 로그 파일이 없습니다.", ephemeral=True)
         return
@@ -536,27 +647,33 @@ async def summary(interaction: discord.Interaction,
         return
     start_time = time.time()
     log_file = os.path.join('logs', f"{date}.txt")
-    if not os.path.exists(log_file):
+    messages = get_day_summary_lines(date)
+    source_label = "DB"
+    if messages is None and not os.path.exists(log_file):
         await send(interaction, "파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
         return
     await loading(interaction)
     notation = await progress_send(interaction, f"`{nowmodel}을 이용해 요약 중...`")
     try:
-        pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
-        messages = []
+        if messages is None:
+            # Compatibility path for a date the database has not imported yet.
+            # TODO(phase-3): remove once migration catch-up is part of deployment.
+            source_label = log_file
+            pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
+            messages = []
 
-        with open(log_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                match = pattern.match(line)
-                if match:
-                    timestamp = match.group(1)
-                    user_id = match.group(2)
-                    message = match.group(3)
-                    dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                    time_formatted = dt.strftime("%H:%M")
-                    real_name = USER_MAP.get(user_id, user_id)
-                    messages.append(f"[{time_formatted}] {real_name}: {message}")
-        await progress_edit(notation, f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
+            with open(log_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    match = pattern.match(line)
+                    if match:
+                        timestamp = match.group(1)
+                        user_id = match.group(2)
+                        message = match.group(3)
+                        dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                        time_formatted = dt.strftime("%H:%M")
+                        real_name = USER_MAP.get(user_id, user_id)
+                        messages.append(f"[{time_formatted}] {real_name}: {message}")
+        await progress_edit(notation, f"`{source_label} 열기 성공. 잠시 기다려주세요.`")
         
         if not messages:
             await loading(interaction, "파일에 분석할 내용이 없습니다.")
@@ -697,7 +814,7 @@ async def stop(interaction: discord.Interaction):
 async def 질문(interaction: discord.Interaction, *, prompt:str):
     try: 
         await loading(interaction)
-        save__logs("USER", prompt)
+        record_command_input(interaction, prompt)
         response = await generate_content_timeout(f"""
 {COMMAND_PERSONA}
 
@@ -712,7 +829,7 @@ async def 질문(interaction: discord.Interaction, *, prompt:str):
         reply_text = "응애! 대답할 수 없음!"
         if response.text is not None: reply_text = f"Q. {prompt}\nA. {response.text}"
         await send(interaction, reply_text)
-        save__logs("최씨 봇", reply_text)
+        record_command_output(interaction, reply_text)
         console_log = f"[DEBUG] 명령어 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
@@ -726,7 +843,7 @@ async def 질문(interaction: discord.Interaction, *, prompt:str):
 async def 알려줘(interaction: discord.Interaction, *, prompt: str):
     try: 
         start_time = time.time()
-        save__logs("USER", prompt)
+        record_command_input(interaction, prompt)
         await loading(interaction)
         start = await progress_send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = await generate_content_timeout(f"""
@@ -746,7 +863,7 @@ async def 알려줘(interaction: discord.Interaction, *, prompt: str):
         end_time = time.time()
         elapsed_time = end_time - start_time
         await progress_edit(start, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
-        save__logs("최씨 봇", reply_text)
+        record_command_output(interaction, reply_text)
         console_log = f"[DEBUG] 정보 제공 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
@@ -761,7 +878,7 @@ async def 알려줘(interaction: discord.Interaction, *, prompt: str):
 async def 자세히(interaction: discord.Interaction, *, prompt: str):
     try: 
         start_time = time.time()
-        save__logs("USER", prompt)
+        record_command_input(interaction, prompt)
         await loading(interaction)
         start = await progress_send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = await generate_content_timeout(f"""
@@ -784,7 +901,7 @@ async def 자세히(interaction: discord.Interaction, *, prompt: str):
         end_time = time.time()
         elapsed_time = end_time - start_time
         await progress_edit(start, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
-        save__logs("최씨 봇", reply_text)
+        record_command_output(interaction, reply_text)
         console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
         #save__logs("Console", console_log)
@@ -882,7 +999,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
         final_reply = final_reply.text if final_reply.text is not None else "응애! 대답할 수 없음!"
         # The original progress message is now the final answer: retain it.
         await loading(interaction, final_reply)
-        save__logs("최씨 봇", final_reply)
+        record_command_output(interaction, final_reply)
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 

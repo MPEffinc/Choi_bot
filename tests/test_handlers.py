@@ -10,7 +10,7 @@ import choi_bot as bot
 from bot.conversation import ConversationQueue
 from bot.llm.contracts import LLMError, LLMResponse
 from bot.llm.router import LLMRouter, task_policies
-from tests.fakes import FakeProvider, FakeClient, FakeChannel, FakeInteraction
+from tests.fakes import temp_log_store, FakeProvider, FakeClient, FakeChannel, FakeInteraction
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -18,7 +18,8 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.provider = FakeProvider()
         self.patches = [patch.object(bot, 'conversation', ConversationQueue(bot.process_conversation_message)), patch.object(bot, 'llm_router', LLMRouter({'gemini': self.provider}, task_policies(bot.MODEL))),
                         patch.object(bot, 'client', FakeClient()), patch.object(bot, 'API_KEYS', ('fake',)),
-                        patch.object(bot, 'save__logs'), patch.object(bot, 'stopflag', 0)]
+                        patch.object(bot, 'save__logs'), patch.object(bot, 'stopflag', 0),
+                        patch.object(bot, 'log_store', temp_log_store(self))]
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)

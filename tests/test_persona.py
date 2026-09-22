@@ -13,7 +13,7 @@ import choi_bot as bot
 from bot import persona
 from bot.conversation import ConversationQueue
 from bot.llm.router import LLMRouter, task_policies
-from tests.fakes import FakeProvider, FakeClient, FakeChannel, FakeInteraction
+from tests.fakes import temp_log_store, FakeProvider, FakeClient, FakeChannel, FakeInteraction
 
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY_REVISION = json.loads((ROOT / 'tests/fixtures/legacy_contract.json')
@@ -176,6 +176,7 @@ class ConversationHandlerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, 'conversation', ConversationQueue(bot.process_conversation_message)),
             patch.object(bot, 'llm_router', LLMRouter({'gemini': self.provider}, task_policies(bot.MODEL))),
             patch.object(bot, 'client', FakeClient()), patch.object(bot, 'save__logs'),
+            patch.object(bot, 'log_store', temp_log_store(self)),
         ]
         for p in self.patches:
             p.start()
@@ -228,6 +229,7 @@ class CommandPromptTests(unittest.IsolatedAsyncioTestCase):
         self.patches = [
             patch.object(bot, 'llm_router', LLMRouter({'gemini': self.provider}, task_policies(bot.MODEL))),
             patch.object(bot, 'save__logs'), patch.object(bot, 'stopflag', 0),
+            patch.object(bot, 'log_store', temp_log_store(self)),
         ]
         for p in self.patches:
             p.start()

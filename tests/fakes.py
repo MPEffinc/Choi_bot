@@ -107,3 +107,20 @@ class FakeTree:
 
     def add_command(self, command):
         self.commands.append(command)
+
+
+def temp_log_store(case):
+    """A LogStore on a throwaway file, cleaned up with the test.
+
+    Without this the module-level store would create logs/db/choi_bot.sqlite3
+    in the working directory and write test rows into the real archive.
+    """
+    import tempfile
+    from pathlib import Path
+    from bot.storage.runtime import LogStore
+
+    directory = tempfile.TemporaryDirectory()
+    case.addCleanup(directory.cleanup)
+    store = LogStore(Path(directory.name) / 'test.sqlite3')
+    case.addCleanup(store.close)
+    return store

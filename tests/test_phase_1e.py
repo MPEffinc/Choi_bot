@@ -14,7 +14,7 @@ from bot.llm.router import LLMRouter, task_policies
 from scripts.phase_1e_candidates import BASE, build, EXAMPLES, EXAMPLE_SOURCES, ROOT
 from scripts.evaluate_phase_1e import plan, run
 from tests.test_llm import Factory, api_error
-from tests.fakes import FakeProvider
+from tests.fakes import temp_log_store, FakeProvider
 
 
 class InputTests(unittest.IsolatedAsyncioTestCase):
@@ -164,7 +164,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def command(self,name,i):
         provider=FakeProvider('generated answer')
         router=LLMRouter({'gemini':provider},task_policies(bot.MODEL))
-        with patch.object(bot,'llm_router',router),patch.object(bot,'save__logs'):
+        with patch.object(bot,'llm_router',router),patch.object(bot,'save__logs'),\
+             patch.object(bot,'log_store',temp_log_store(self)):
             await getattr(bot,name).callback(i,prompt='synthetic question')
         await router.aclose()
         self.assertEqual(len(provider.requests),1)
@@ -195,7 +196,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_menu_original_final_is_not_deleted(self):
         i=LifecycleInteraction();provider=FakeProvider('candidates','final menu')
         router=LLMRouter({'gemini':provider},task_policies(bot.MODEL))
-        with patch.object(bot,'llm_router',router),patch.object(bot,'save__logs'):
+        with patch.object(bot,'llm_router',router),patch.object(bot,'save__logs'),\
+             patch.object(bot,'log_store',temp_log_store(self)):
             await bot.점메추.callback(i,message='rice')
         await router.aclose()
         self.assertEqual(i.original.content,'final menu')
