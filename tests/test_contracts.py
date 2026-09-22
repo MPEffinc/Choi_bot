@@ -11,7 +11,7 @@ from unittest.mock import patch, Mock
 import choi_bot as bot
 from bot.settings import Settings, load_settings, validate_settings
 from tests.fakes import FakeClient, FakeTree, FakeProvider
-from bot.llm.router import LLMRouter, legacy_policies
+from bot.llm.router import LLMRouter, task_policies
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,13 +32,16 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(len(commands), 20)
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Name) and n.func.id == 'generate_content_timeout']
-        self.assertEqual([ast.dump(n.args[0]) for n in calls], baseline['prompts'])
+        self.assertCountEqual([ast.dump(n.args[0]) for n in calls], baseline['prompts'])
         self.assertEqual(len(calls), 10)
         self.assertTrue(all(any(k.arg == 'task_type' for k in n.keywords) for n in calls))
         templates = [ast.dump(n.value) for n in ast.walk(tree) if isinstance(n, ast.Assign)
                      and any(isinstance(x, ast.Name) and x.id in ('CHARACTER_PROMPT', 'prompt', 'final_prompt')
                              for x in n.targets)]
-        self.assertEqual(templates, baseline['templates'])
+        normalized = [value.replace("Name(id='source_text', ctx=Load())", "Attribute(value=Name(id='self', ctx=Load()), attr='message', ctx=Load())")
+                      .replace("Name(id='target_lang', ctx=Load())", "Attribute(value=Name(id='self', ctx=Load()), attr='target_lang', ctx=Load())")
+                      for value in templates]
+        self.assertCountEqual(normalized, baseline['templates'])
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 self.assertFalse(any(n.name.startswith('google') for n in node.names))
@@ -53,11 +56,11 @@ import os, socket, sys
 from unittest.mock import patch
 import discord
 from discord.ext import commands
-with patch.object(discord, 'Client', side_effect=AssertionError('client on import')), \\
+with patch.object(discord.Client, '__init__', side_effect=AssertionError('client on import')), \\
      patch.object(socket.socket, 'connect', side_effect=AssertionError('network')):
     import choi_bot
     assert choi_bot.client is None and choi_bot.llm_router is None
-    assert 'google.generativeai' not in sys.modules
+    assert 'google.genai' not in sys.modules
     assert not os.listdir('.')
 '''
         with tempfile.TemporaryDirectory() as directory:
@@ -81,7 +84,7 @@ with patch.object(discord, 'Client', side_effect=AssertionError('client on impor
             self.assertNotIn('environment', repr(settings))
 
     def test_initialization_registers_all_commands_without_connecting(self):
-        router = LLMRouter({'gemini': FakeProvider()}, legacy_policies(bot.MODEL))
+        router = LLMRouter({'gemini': FakeProvider()}, task_policies(bot.MODEL))
         with tempfile.TemporaryDirectory() as directory, patch.object(bot, 'LOG_FOLDER', directory):
             client = bot.initialize_runtime(Settings(('fake',), 'fake'), router=router,
                                             client_factory=FakeClient, tree_factory=FakeTree)

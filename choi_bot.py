@@ -12,7 +12,11 @@ import re
 
 from bot.settings import Settings, load_settings, validate_settings
 from bot.llm.contracts import LLMError, LLMRequest, Message
-from bot.llm.router import LLMRouter, legacy_policies
+from bot.llm.router import LLMRouter, task_policies
+from bot.conversation import ConversationQueue
+from bot.discord_output import (send, edit, loading, channel_send, progress_edit,
+                                progress_delete, progress_send)
+from types import SimpleNamespace
 
 
 #환경 변수 및 상수
@@ -206,7 +210,7 @@ tree = None
 llm_router = None
 
 
-async def generate_content_timeout(prompt, timeout=20, *, task_type):
+async def generate_content_timeout(prompt, timeout=None, *, task_type):
     if llm_router is None:
         raise RuntimeError("LLM runtime is not initialized")
     return await llm_router.generate(LLMRequest(
@@ -258,36 +262,6 @@ conversation_context = deque(maxlen=MAX_DIALOGS)
 #마지막 대화 시간 저장
 last_conversation_time = 0
 
-#채팅 메시지 보내기
-async def send(interaction: discord.Interaction, 
-               content:str, *, 
-               ephemeral: bool = False,
-               view: discord.ui.View = None
-               ):
-    if not interaction.response.is_done():
-        if view is not None:
-            return await interaction.response.send_message(content, ephemeral=ephemeral, view=view)
-        return await interaction.response.send_message(content, ephemeral=ephemeral)
-    else:
-        if view is not None:
-            return await interaction.channel.send(content, view=view)
-        return await interaction.channel.send(content)
-
-async def edit(interaction: discord.Interaction, content:str):
-    if not interaction.response.is_done():
-        return await send(interaction, content)
-    else:
-        return await interaction.edit_original_response(content=content)
-
-
-async def loading(interaction: discord.Interaction, content:str = None, thinking: bool = True):
-    if not interaction.response.is_done():
-        return await interaction.response.defer(thinking=thinking)
-    else: 
-        return await interaction.edit_original_response(content=content)
-
-
-
 #최근 대화 내역 저장, 사용자 맥락
 def update_context(user, message):
     global last_conversation_time
@@ -311,6 +285,7 @@ def is_alive():
 last_reset_time = 0
 async def clear_context(arg = "Auto"):
     global conversation_context, active_users, reset_flag
+    conversation.reset("natural" if arg == "Finite Context" else arg)
     conversation_context.clear()
     active_users.clear()
     reset_flag = 1
@@ -318,7 +293,10 @@ async def clear_context(arg = "Auto"):
     channel = client.get_channel(ANNOUNCEMENT_CH)
     if channel:
         texts = f"`Conversation context initialized. = {arg}`"
-        await channel.send(texts)
+        try:
+            await channel.send(texts)
+        except Exception:
+            print("[WARN] Context reset notice could not be sent")
     console_log = f"[DEBUG] 대화 맥락 초기화됨: {arg}"
     print(console_log)
     #save__logs("Console", console_log)
@@ -340,9 +318,9 @@ async def on_ready(): #Start client
     synced = await tree.sync()
     print(f"✅ 최씨 봇 준비 완료! {client.user}- 등록된 명령어 수: {len(synced)}")
     await client.change_presence(activity=discord.Game("잉! 잉! 안 나가!"))
-    send_announcement.start()
-    check_context.start()
-    send_waist.start()
+    for loop in (send_announcement, check_context, send_waist):
+        if not loop.is_running():
+            loop.start()
 
 @tasks.loop(seconds=ANNOUNCEMENT_TIME) #Announcement
 async def send_announcement():
@@ -424,44 +402,55 @@ async def on_application_command_error(interaction: discord.Interaction, error: 
         await send(interaction, "침입자 발견, 자가방어시스템을 가동합니다.")
         print(str(error))
 
+def record_bot_reply(text):
+    try:
+        save__logs("최씨 봇", text)
+    except OSError:
+        print("[WARN] Bot reply log write failed; generation will not be repeated")
+
+
 #답변 출력 함수
-async def reply(message, response):
-    reply_text = "응애! 대답할 수 없음!"
-    if response.text is not None: reply_text = response.text
+async def reply(message, response, epoch=None):
+    epoch = conversation.epoch if epoch is None else epoch
+    valid = lambda: conversation.valid(epoch)
+    if not valid():
+        return
+    reply_text = response.text if response.text is not None else "응애! 대답할 수 없음!"
     if "마이크 끄는 소리" in reply_text:
-        await message.channel.send(reply_text)
-        save__logs("최씨 봇", reply_text)
-        console_log = f"[DEBUG] 답변 생성됨. 질의: {message.content} 내용: {reply_text}"
-        print(console_log)
-        #save__logs("Console", console_log)
-        await clear_context("Finite Context")
-        return 
+        if await channel_send(message.channel, reply_text, valid=valid):
+            record_bot_reply(reply_text)
+            await clear_context("Finite Context")
+        return
     if "00100" not in reply_text:
-        await message.channel.send(reply_text)
-        save__logs("최씨 봇", reply_text)
-        console_log = f"[DEBUG] 답변 생성됨. 질의: {message.content} 내용: {reply_text}"
-        print(console_log)
-        #save__logs("Console", console_log)
-    elif "00100" in reply_text:
-        save__logs("최씨 봇", reply_text)
-        console_log = f"[DEBUG] 답변 생성되었으나, return Code: {reply_text} 질의: {message.content}"
-        print(console_log)
-        #save__logs("Console", console_log)
-    update_context("최씨 봇", reply_text)
-    
-    
+        if not await channel_send(message.channel, reply_text, valid=valid):
+            return
+    if valid():
+        record_bot_reply(reply_text)
+        update_context("최씨 봇", reply_text)
+
 
 async def on_message(message):
     if message.author == client.user:
-        return #ignore client message self
-    
-    user = message.author.name
-    save__logs(user, message.content)
-    
+        return
+    save__logs(message.author.name, message.content)
     if message.channel.id not in ALLOWED_CH:
-        return #allowed channel
-    
-    
+        return
+    snapshot = SimpleNamespace(content=str(message.content), channel=message.channel,
+                               author=SimpleNamespace(name=str(message.author.name)))
+    try:
+        await conversation.submit(snapshot, is_called(snapshot.content))
+    except asyncio.QueueFull:
+        await channel_send(message.channel, "대화 요청이 많아 잠시 후 다시 불러주세요.")
+
+
+async def process_conversation_message(message, epoch):
+    if not conversation.valid(epoch):
+        return
+    if conversation_context and not is_alive():
+        epoch = conversation.epoch + 1
+        await clear_context("Expired")
+        if not conversation.valid(epoch):
+            return
 
     #New Context
     if not conversation_context and is_called(message.content):
@@ -486,11 +475,13 @@ async def on_message(message):
 - 답변 본문만 출력. '답변:' 같은 라벨 금지
 - 출력 규격을 지켜서 자연스럽게 이어서 말할 것
 """, task_type="chat")
-            await reply(message, response)
+            await reply(message, response, epoch)
             print(conversation_context)
                 
         except Exception as e:
-            await message.channel.send(f"잉! 잘못된 명령 발생! {str(e)}")
+            if conversation.valid(epoch):
+                await channel_send(message.channel, f"잉! 잘못된 명령 발생! {str(e)}",
+                                   valid=lambda: conversation.valid(epoch))
 
     #Context Continuity
     elif conversation_context and is_alive():
@@ -513,11 +504,13 @@ async def on_message(message):
 [출력 규칙]
 - 답변 본문만 출력. '답변:' 같은 라벨 금지
 - 출력 규격을 지켜서 자연스럽게 이어서 말할 것""", task_type="chat")
-            await reply(message, response)
+            await reply(message, response, epoch)
             print(conversation_context)
 
         except Exception as e:
-            await message.channel.send(f"잉! 잘못된 명령 발생! {str(e)}")
+            if conversation.valid(epoch):
+                await channel_send(message.channel, f"잉! 잘못된 명령 발생! {str(e)}",
+                                   valid=lambda: conversation.valid(epoch))
 
     else:
         return
@@ -644,7 +637,7 @@ async def summary(interaction: discord.Interaction,
         await send(interaction, "파일이 존재하지 않거나, 형식이 잘못되었습니다. 날짜 형식: YYYY-MM-DD")
         return
     await loading(interaction)
-    notation = await send(interaction, f"`{nowmodel}을 이용해 요약 중...`")
+    notation = await progress_send(interaction, f"`{nowmodel}을 이용해 요약 중...`")
     try:
         pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (.+?): (.+)")
         messages = []
@@ -660,7 +653,7 @@ async def summary(interaction: discord.Interaction,
                     time_formatted = dt.strftime("%H:%M")
                     real_name = USER_MAP.get(user_id, user_id)
                     messages.append(f"[{time_formatted}] {real_name}: {message}")
-        await notation.edit(content=f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
+        await progress_edit(notation, f"`{log_file} 열기 성공. 잠시 기다려주세요.`")
         
         if not messages:
             await loading(interaction, "파일에 분석할 내용이 없습니다.")
@@ -670,10 +663,9 @@ async def summary(interaction: discord.Interaction,
         chunk_size = 4000
         chunks = [combined_text[i:i + chunk_size] for i in range(0, len(combined_text), chunk_size)]
         
-        await notation.edit(content=f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
+        await progress_edit(notation, f"`{date}의 총 대화 글자 수: {len(combined_text)}자, {len(chunks)}회 나눠서 분석 시작합니다.`")
 
         all_summaries = []
-        max_retry = len(API_KEYS)  # 최대 재시도 횟수는 API 키 개수로 설정
 
         for idx, chunk in enumerate(chunks):
             if flag == 0:
@@ -699,30 +691,18 @@ async def summary(interaction: discord.Interaction,
 {chunk}
 요약: 
 """
-            success = False
-            attempt = 0
-            while not success and attempt < max_retry:
-                try:
-                    response = await generate_content_timeout(prompt, task_type="summary_map" if flag == 0 else "search_map")
-                    summary = response.text if response.text is not None else f"{idx + 1}번째 요약 실패."
-                    all_summaries.append(summary)
-                    print(f"[DEBUG]: {idx + 1}: {summary}\n")
-                    await notation.edit(content=f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
-                    success = True
-                except Exception as e:
-                    if isinstance(e, LLMError) and e.error_type == "quota":
-                        err = "API 요청 과부하!"
-                    elif isinstance(e, LLMError) and e.error_type == "timeout":
-                        err = "요약 요청이 10초를 초과했습니다."
-                    else:
-                        err = str(e)
-                    await notation.edit(content=f"`[ERROR] 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
-                    attempt += 1
-                    await asyncio.sleep(2)  # 잠시 대기 후 재시도
-            if not success:
-                await notation.edit(content=f"`{idx + 1}/{len(chunks)} 청크 요약 실패. 재시도 횟수 초과.`")
+            try:
+                response = await generate_content_timeout(prompt, task_type="summary_map" if flag == 0 else "search_map")
+            except LLMError as error:
+                await progress_edit(notation, f"`{idx + 1}/{len(chunks)} 청크 처리 실패: {error}`")
+                # Do not present incomplete coverage as a complete summary.
+                await loading(interaction, "일부 대화를 처리하지 못해 요약을 완료하지 못했습니다. 잠시 후 다시 시도해주세요.")
+                return
+            summary = response.text if response.text is not None else f"{idx + 1}번째 요약 실패."
+            all_summaries.append(summary)
+            await progress_edit(notation, f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
          # 최종 요약 요청
-        await notation.edit(content=f"`최종 요약 진행 중...`")
+        await progress_edit(notation, f"`최종 요약 진행 중...`")
         combined_summaries = " ".join(all_summaries)
         if flag == 0:
             final_prompt = f"""
@@ -754,40 +734,15 @@ async def summary(interaction: discord.Interaction,
 
 최종 요약:
 """
-        success = False
-        attempt = 0
-        while not success and attempt < max_retry:
-            try:
-                final_response = await generate_content_timeout(final_prompt, task_type="summary_reduce" if flag == 0 else "search_reduce")
-                final_summary = final_response.text if final_response.text is not None else "최종 요약 실패."
-                if len(final_summary) > 2000:
-                    flag = 2  # 너무 길 때 표시
-                print(f"[DEBUG]: 최종 요약: {final_summary}\n")
-                success = True
-            except Exception as e:
-                if isinstance(e, LLMError) and e.error_type == "quota":
-                    err = "API 요청 과부하!"
-                elif isinstance(e, LLMError) and e.error_type == "timeout":
-                    err = "최종 요약 요청이 10초를 초과했습니다."
-                else:
-                    err = str(e)
-                await notation.edit(content=f"`[ERROR] 최종 요약 실패, 재시도 중... {attempt + 1}/{max_retry} - {err}`")
-                attempt += 1
-                await asyncio.sleep(2)
+        final_response = await generate_content_timeout(final_prompt, task_type="summary_reduce" if flag == 0 else "search_reduce")
+        final_summary = final_response.text if final_response.text is not None else "최종 요약 실패."
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await notation.edit(content=f"`{nowmodel}: 요약 소요 시간: {elapsed_time:.2f}s`")
+        await progress_edit(notation, f"`{nowmodel}: 요약 소요 시간: {elapsed_time:.2f}s`")
         if flag == 0:
             await loading(interaction, f"# {date}에는 이런 대화들을 나눴어요!\n{final_summary}")
         elif flag == 1:
             await loading(interaction, f"# {date}에 나눈 대화 중 `{find}`에 대한 검색 결과입니다.\n{final_summary}")
-        elif flag == 2:
-            await loading(interaction, f"# {date}에는 이런 대화들을 나눴어요!")
-            contents = []
-            for i in range(0, len(final_summary), 1990):
-                contents.append(final_summary[i:i+1990])
-            for content in contents:
-                await send(interaction, content)
 
     except Exception as e:
         await loading(interaction, f"요약 중 오류 발생: {str(e)}")
@@ -838,6 +793,7 @@ async def stop(interaction: discord.Interaction):
 )
 async def 질문(interaction: discord.Interaction, *, prompt:str):
     try: 
+        await loading(interaction)
         save__logs("USER", prompt)
         response = await generate_content_timeout(f"""
 이 질문에 한해, 다음 캐릭터 설정의 말투만 참고하여 정확한 정보를 제공해.
@@ -867,7 +823,7 @@ async def 알려줘(interaction: discord.Interaction, *, prompt: str):
         start_time = time.time()
         save__logs("USER", prompt)
         await loading(interaction)
-        start = await send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        start = await progress_send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = await generate_content_timeout(f"""
 이 질문에 한해, 다음 캐릭터 설정의 말투만 참고하여 정확한 정보를 제공해.
 캐릭터 설정:
@@ -885,7 +841,7 @@ async def 알려줘(interaction: discord.Interaction, *, prompt: str):
         end_time = time.time()
         elapsed_time = end_time - start_time
         await loading(interaction, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
-        await start.delete()
+        await progress_delete(start)
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 정보 제공 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
@@ -903,7 +859,7 @@ async def 자세히(interaction: discord.Interaction, *, prompt: str):
         start_time = time.time()
         save__logs("USER", prompt)
         await loading(interaction)
-        start = await send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
+        start = await progress_send(interaction, f"`{nowmodel} 에서 답변 생성중입니다. 잠시 기다려주세요...`")
         response = await generate_content_timeout(f"""
 정보를 요청하는 질문에 대해 자세히 답변해줘.
 단어인 경우 그 단어에 대해서 자세한 설명을 해줘.
@@ -923,7 +879,7 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await start.delete()
+        await progress_delete(start)
         await loading(interaction, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
@@ -975,7 +931,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
         await send(interaction, f"{time} 메뉴 추천을 위한 명령어입니다. 사용법: `!점메추 <추천 요청사항>`")
    
     await loading(interaction)
-    notation = await send(interaction, f"`{nowmodel}이 최적의 {time} 메뉴를 추천합니다...`")
+    notation = await progress_send(interaction, f"`{nowmodel}이 최적의 {time} 메뉴를 추천합니다...`")
     
     try:
         response = await generate_content_timeout(f"""
@@ -1018,7 +974,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
     """, task_type="menu_select")
         final_reply = final_reply.text if final_reply.text is not None else "응애! 대답할 수 없음!"
         await loading(interaction, final_reply)
-        await notation.delete()
+        await progress_delete(notation)
         save__logs("최씨 봇", final_reply)
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
@@ -1103,23 +1059,24 @@ class TranslateView(View):
             await send(interaction, "언어를 선택해주세요!", ephemeral=True)
             return
         
+        source_text, target_lang = self.message, self.target_lang
         prompt = f"""
 너는 번역기고, 이제부터 내가 준 문장에 대해 번역만을 출력해야돼.
-다음 문장의 언어가 무엇인지 판별하고, 해당 문장을 {self.target_lang}로 자연스럽게 번역해줘.
-번역할 문장: {self.message}
+다음 문장의 언어가 무엇인지 판별하고, 해당 문장을 {target_lang}로 자연스럽게 번역해줘.
+번역할 문장: {source_text}
 다음 조건을 준수해.
 1. 언어 감지는 확실하게 하며, 언어가 감지되지 않거나 불확실하면 "언어 감지 실패!"만 출력
 2. 감지 언어와 번역 언어가 같으면 그냥 출력해.
 3. 목표 언어가 중국어라면, 번역된 문장 뒤에 한어병음을 괄호에 넣어 표기해줘.
 4. 목표 언어가 일본어라면, 문장 뒤에 히라가나로만 된 문장을 추가로 괄호에 넣어 표기해줘.
-5. 위 4개 상황이 아니라면, 자연스럽게 {self.target_lang}로 번역된 문장만을 출력해.
+5. 위 4개 상황이 아니라면, 자연스럽게 {target_lang}로 번역된 문장만을 출력해.
 """
         await loading(interaction)
 
         try:
             response = await generate_content_timeout(prompt, task_type="translation")
             result = response.text if response.text is not None else "번역 실패!"
-            await loading(interaction, f"**원본 언어**: {self.message}\n**`{self.target_lang}`번역**: {result}")
+            await loading(interaction, f"**원본 언어**: {source_text}\n**`{target_lang}`번역**: {result}")
         except Exception as e:
             await loading(interaction, f"칩임자 발견, 자가방어시스템을 가동합니다. {str(e)}")
 
@@ -1248,6 +1205,21 @@ async def 해제_autocomplete(interaction: discord.Interaction, current: str):
 
 
 
+conversation = ConversationQueue(process_conversation_message)
+
+
+class ChoiClient(discord.Client):
+    async def close(self):
+        for loop in (send_announcement, check_context, send_waist):
+            loop.cancel()
+        await conversation.aclose()
+        try:
+            if llm_router is not None:
+                await llm_router.aclose()
+        finally:
+            await super().close()
+
+
 def initialize_runtime(settings: Settings, *, router=None, client_factory=None, tree_factory=None):
     """Prepare one process runtime without connecting; dependencies may be fakes.
 
@@ -1259,7 +1231,7 @@ def initialize_runtime(settings: Settings, *, router=None, client_factory=None, 
     if router is None:
         from bot.llm.gemini import GeminiAdapter
         router = LLMRouter(
-            {"gemini": GeminiAdapter(settings.api_keys, MODEL)}, legacy_policies(MODEL),
+            {"gemini": GeminiAdapter(settings.api_keys, MODEL, key_ids=settings.key_ids or None)}, task_policies(MODEL),
         )
     intents = discord.Intents.default()
     intents.messages = True
@@ -1267,7 +1239,7 @@ def initialize_runtime(settings: Settings, *, router=None, client_factory=None, 
     intents.members = True
     intents.presences = True
     intents.guilds = True
-    new_client = (client_factory or discord.Client)(intents=intents)
+    new_client = (client_factory or ChoiClient)(intents=intents)
     new_tree = (tree_factory or app_commands.CommandTree)(new_client)
     new_client.event(on_ready)
     new_client.event(on_message)

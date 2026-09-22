@@ -1,120 +1,260 @@
-"""Temporary legacy SDK adapter. Global configure/worker races are NOT solved.
-
-The original RR, executor timeout and key-count retries intentionally remain.
-Phase 1B will replace this execution policy and the SDK together.
-"""
+"""google-genai adapter: one native async attempt, explicit client per key."""
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import asyncio
+import math
 import time
 
-from .contracts import LLMError, LLMRequest, LLMResponse, TaskPolicy
+from .contracts import LLMError, LLMResponse
+
+
+@dataclass
+class KeyState:
+    key_id: str
+    client: object = field(repr=False)
+    group: str = 'unknown'
+    disabled: bool = False
+    attempts: int = 0
+    inflight: int = 0
+    reservations: int = 0
+    usage: dict = field(default_factory=dict)
+
+
+@dataclass
+class QuotaGroup:
+    cooldown_until: float = 0
+    blocked: bool = False
+    reason: str = 'quota_unknown'
+
+
+def _error(kind, retryable=False, code=None, retry_after=None):
+    # Never include SDK exception strings, URLs, response bodies or API keys.
+    return LLMError(f'Gemini 요청 실패: {kind}', error_type=kind, retryable=retryable,
+                    provider='gemini', status_code=code, retry_after=retry_after)
+
+
+def _delay(value):
+    try:
+        result = float(str(value).removesuffix('s'))
+        return max(0, result) if math.isfinite(result) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def normalize_error(error):
+    import httpx
+    from google.genai import errors
+    if isinstance(error, LLMError):
+        return error
+    if isinstance(error, (asyncio.TimeoutError, httpx.TimeoutException)):
+        return _error('timeout', True)
+    if isinstance(error, (httpx.NetworkError, httpx.RemoteProtocolError, ConnectionError)):
+        return _error('network', True)
+    if not isinstance(error, errors.APIError):
+        # aiohttp may be selected by the SDK when installed (discord depends on it).
+        try:
+            import aiohttp
+            if isinstance(error, aiohttp.ClientConnectionError):
+                return _error('network', True)
+        except ImportError:
+            pass
+        return _error('invalid_request' if isinstance(error, ValueError) else 'provider_error')
+    code = error.code
+    data = error.details if isinstance(error.details, dict) else {}
+    data = data.get('error', data)
+    details = data.get('details', []) if isinstance(data, dict) else []
+    details = details if isinstance(details, list) else []
+    reasons = {d.get('reason') for d in details if isinstance(d, dict) and isinstance(d.get('reason'), str)}
+    delays = []
+    headers = getattr(getattr(error, 'response', None), 'headers', {}) or {}
+    header = headers.get('retry-after') or headers.get('Retry-After')
+    if header:
+        seconds = _delay(header)
+        if seconds is None:
+            try:
+                seconds = max(0, (parsedate_to_datetime(header) - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                pass
+        if seconds is not None:
+            delays.append(seconds)
+    quotas = []
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        seconds = _delay(detail.get('retryDelay'))
+        if seconds is not None:
+            delays.append(seconds)
+        for violation in detail.get('violations', []) or []:
+            if isinstance(violation, dict):
+                quotas.extend(str(violation.get(n, '')).lower() for n in ('quotaId', 'quotaMetric'))
+    after = max(delays) if delays else None
+    if code == 401 or reasons & {'API_KEY_INVALID', 'API_KEY_EXPIRED'}:
+        return _error('authentication', code=code)
+    if code == 403:
+        return _error('permission', code=code)
+    if code == 429:
+        if any(any(s in q for s in ('perday', 'per_day', 'daily')) for q in quotas):
+            return _error('quota_long', code=code, retry_after=after)
+        if after is not None or any(any(s in q for s in ('perminute', 'per_minute')) for q in quotas):
+            return _error('rate_limit', True, code, after)
+        return _error('quota_unknown', code=code)
+    if code in (408, 500, 502, 503, 504):
+        return _error('unavailable', True, code, after)
+    return _error('invalid_request', code=code)
 
 
 class GeminiAdapter:
-    def __init__(self, api_keys: tuple[str, ...], model: str, *, sdk=None):
-        if not api_keys:
-            raise ValueError("Google Generative AI API KEY ERROR!")
-        if sdk is None:
-            import google.generativeai as sdk
-        from google.api_core.exceptions import ResourceExhausted
-        self.sdk = sdk
-        self.quota_exception = ResourceExhausted
-        self.api_keys = api_keys
-        self.model_name = model
-        self.current_api_index = 0
-        self.call_count = 0
-        self._configure()
-
-    def _configure(self):
-        self.sdk.configure(api_key=self.api_keys[self.current_api_index])
-        self.model = self.sdk.GenerativeModel(self.model_name)
-
-    def rotate_api_key(self):
-        self.current_api_index = (self.current_api_index + 1) % len(self.api_keys)
-        self._configure()
-        print(f"[DEBUG] API 키 회전됨: {self.current_api_index}번")
-
-    def conf_next(self):
-        if self.call_count >= 3:
-            self.rotate_api_key()
-            self.call_count = 0
-            return
-        self.call_count += 1
-
-    def is_quota_error(self, error):
-        message = str(error).lower()
-        return isinstance(error, self.quota_exception) or any(
-            text in message for text in
-            ("429", "quota", "rate limit", "resource has been exhausted")
-        )
-
-    def _error(self, error):
-        code = getattr(error, "code", None)
-        code = int(code) if isinstance(code, int) else None
-        if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
-            kind, retryable = "timeout", True
-        elif isinstance(error, self.quota_exception):
-            kind, retryable = "quota", True
-        elif self.is_quota_error(error):
-            # Same retry eligibility, but retain the legacy summary UI's
-            # distinction between ResourceExhausted and string-matched errors.
-            kind, retryable = "rate_limit", True
-        elif code in (401, 403):
-            kind, retryable = "authentication", False
-        elif code == 400:
-            kind, retryable = "invalid_request", False
-        else:
-            kind, retryable = "provider_error", False
-        return LLMError(str(error), error_type=kind, retryable=retryable,
-                        provider="gemini", status_code=code)
-
-    async def generate(self, request: LLMRequest, policy: TaskPolicy) -> LLMResponse:
-        # Phase 1A deliberately sends the identical single prompt string.
-        if len(request.messages) != 1 or request.messages[0].role != "user":
-            raise LLMError("Legacy adapter requires one user prompt", error_type="invalid_request",
-                           retryable=False, provider="gemini")
-        if policy.model != self.model_name:
-            raise LLMError("Unsupported model", error_type="invalid_request",
-                           retryable=False, provider="gemini")
-        started = time.monotonic()
+    def __init__(self, api_keys, model, *, key_ids=None, quota_groups=None,
+                 client_factory=None, clock=time.monotonic):
+        from google import genai
+        from google.genai import types
+        self.types = types
+        self.model = model
+        self.clock = clock
+        self.keys = []
+        self.groups = {}
+        self.closed = False
+        self._cursor = 0
+        factory = client_factory or genai.Client
+        key_ids = key_ids or tuple(f'key{i+1}' for i in range(len(api_keys)))
+        if len(key_ids) != len(api_keys):
+            raise ValueError('Key label count mismatch')
         try:
-            if policy.advance_legacy_key:
-                self.conf_next()
-            return await self._generate(request, started)
-        except Exception as error:
-            raise self._error(error) from error
+            for key_id, key in zip(key_ids, api_keys):
+                if not key:
+                    continue
+                client = factory(api_key=key, vertexai=False, http_options=types.HttpOptions(
+                    api_version='v1beta', retry_options=types.HttpRetryOptions(attempts=1)))
+                group = (quota_groups or {}).get(key_id, 'unknown')
+                self.keys.append(KeyState(key_id, client, group))
+                self.groups.setdefault((group, model), QuotaGroup())
+        except Exception:
+            for state in self.keys:
+                state.client.close()
+            raise _error('configuration') from None
+        if not self.keys:
+            raise ValueError('Google Generative AI API KEY ERROR!')
 
-    async def _generate(self, request, started):
-        loop = asyncio.get_running_loop()
-        max_retry = max(1, len(self.api_keys))
-        for attempt in range(max_retry):
+    def bind(self, request, policy):
+        if self.closed:
+            raise _error('closed')
+        if policy.model != self.model or len(request.messages) != 1 or request.messages[0].role != 'user':
+            raise _error('invalid_request')
+        try:
+            # Preserve all model defaults. No system/history rewrite or thinking change.
+            options = dict(request.generation_options)
+            if 'http_options' in options or 'automatic_function_calling' in options:
+                raise ValueError('Reserved transport option')
+            config = self.types.GenerateContentConfig(**options)
+        except Exception:
+            raise _error('invalid_request') from None
+        healthy = [k for k in self.keys if not k.disabled and not self.groups[(k.group, self.model)].blocked]
+        if not healthy:
+            if any(not k.disabled for k in self.keys):
+                raise _error('quota_long')
+            raise _error('authentication')
+        # Select once per logical request. Actual attempts/usage are counted below.
+        ordered = self.keys[self._cursor:] + self.keys[:self._cursor]
+        key = min(healthy, key=lambda k: (max(0, self.groups[(k.group, self.model)].cooldown_until - self.clock()),
+                                         k.attempts + k.reservations, ordered.index(k)))
+        self._cursor = (self.keys.index(key) + 1) % len(self.keys)
+        key.reservations += 1
+        return GeminiRequest(self, key, config)
+
+    async def aclose(self):
+        if self.closed:
+            return
+        self.closed = True
+        async def close(key):
             try:
-                kwargs = ({"generation_config": dict(request.generation_options)}
-                          if request.generation_options else {})
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: self.model.generate_content(
-                        request.messages[0].content, **kwargs)),
-                    timeout=request.timeout,
-                )
-                text = getattr(response, "text", None)
-                print(f"[DEBUG] 모델 응답 수신: {text if text is not None else '(text 속성 없음)'}")
-                usage_metadata = getattr(response, "usage_metadata", None)
-                usage = {name: getattr(usage_metadata, name) for name in
-                         ("prompt_token_count", "candidates_token_count", "total_token_count")
-                         if isinstance(getattr(usage_metadata, name, None), int)}
-                candidates = getattr(response, "candidates", ())
-                reason = getattr(candidates[0], "finish_reason", None) if candidates else None
-                return LLMResponse(text, "gemini", self.model_name, usage,
-                                   time.monotonic() - started,
-                                   getattr(reason, "name", str(reason)) if reason is not None else None)
-            except asyncio.TimeoutError as error:
-                last_error = error
-                print(f"[경고] 요청 타임아웃({request.timeout}s). 키 회전 후 재시도: {attempt + 1}/{max_retry}")
-            except Exception as error:
-                last_error = error
-                if not self.is_quota_error(error):
-                    raise
-                print(f"[경고] 쿼터/레이트 제한 감지. 키 회전 후 재시도: {attempt + 1}/{max_retry} - {error}")
-            if attempt < max_retry - 1 and len(self.api_keys) > 1:
-                self.rotate_api_key()
-                await asyncio.sleep(0.5)
-        raise last_error
+                await key.client.aio.aclose()
+            finally:
+                key.client.close()
+        results = await asyncio.gather(*(close(key) for key in self.keys), return_exceptions=True)
+        if any(isinstance(result, Exception) for result in results):
+            raise _error('close_failed') from None
+
+
+class GeminiRequest:
+    def __init__(self, adapter, key, config):
+        self.adapter, self.key, self.config = adapter, key, config
+        self.key_id, self.quota_group = key.key_id, key.group
+        self.released = False
+
+    def release(self):
+        if not self.released:
+            self.key.reservations -= 1
+            self.released = True
+
+    def ready_delay(self):
+        if self.adapter.closed:
+            raise _error('closed')
+        if self.key.disabled:
+            raise _error('authentication')
+        group = self.adapter.groups[(self.quota_group, self.adapter.model)]
+        if group.blocked:
+            raise _error(group.reason)
+        return max(0, group.cooldown_until - self.adapter.clock())
+
+    async def generate(self, request, policy, timeout):
+        types = self.adapter.types
+        config = self.config.model_copy(deep=True)
+        config.http_options = types.HttpOptions(timeout=max(1, int(timeout * 1000)),
+                                                retry_options=types.HttpRetryOptions(attempts=1))
+        config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
+        self.key.attempts += 1
+        self.key.inflight += 1
+        start = self.adapter.clock()
+        try:
+            response = await self.key.client.aio.models.generate_content(
+                model=policy.model, contents=request.messages[0].content, config=config)
+            usage = {}
+            metadata = response.usage_metadata
+            for name in ('prompt_token_count', 'candidates_token_count', 'total_token_count',
+                         'cached_content_token_count', 'thoughts_token_count'):
+                value = getattr(metadata, name, None)
+                if isinstance(value, int):
+                    usage[name] = value
+                    self.key.usage[name] = self.key.usage.get(name, 0) + value
+            feedback = response.prompt_feedback
+            block = getattr(feedback, 'block_reason', None)
+            if block and str(getattr(block, 'value', block)) not in ('BLOCKED_REASON_UNSPECIFIED', '0'):
+                raise _error('blocked')
+            candidates = response.candidates or []
+            if not candidates:
+                raise _error('empty_response')
+            reason = getattr(candidates[0].finish_reason, 'value', candidates[0].finish_reason)
+            if reason in ('SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'IMAGE_SAFETY', 'IMAGE_PROHIBITED_CONTENT'):
+                raise _error('blocked')
+            if reason not in (None, 'STOP', 'MAX_TOKENS'):
+                raise _error('invalid_response')
+            content = candidates[0].content
+            # Only visible text; never disclose thought parts or stringified tool calls.
+            parts = content.parts if content else []
+            text = ''.join(part.text for part in parts or [] if part.text and not part.thought)
+            if not text:
+                raise _error('empty_response')
+            return LLMResponse(text, 'gemini', policy.model, usage, self.adapter.clock() - start,
+                               reason, model_version=response.model_version)
+        except asyncio.CancelledError:
+            raise
+        except Exception as raw:
+            error = normalize_error(raw)
+            group = self.adapter.groups[(self.quota_group, policy.model)]
+            if error.error_type == 'authentication':
+                self.key.disabled = True
+            elif error.error_type == 'quota_long':
+                group.reason = error.error_type
+                if error.retry_after is None:
+                    group.blocked = True  # Unknown reset time: explicit restart/reconfiguration.
+                else:
+                    group.cooldown_until = max(group.cooldown_until, self.adapter.clock() + error.retry_after)
+            elif error.error_type in ('rate_limit', 'quota_unknown'):
+                # Unknown 429 is not retried; 60s is an operational cooldown, NOT an API limit.
+                cooldown = error.retry_after if error.retry_after is not None else (
+                    60 if error.error_type == 'quota_unknown' else policy.backoff)
+                group.cooldown_until = max(group.cooldown_until, self.adapter.clock() + cooldown)
+            raise error from None
+        finally:
+            self.key.inflight -= 1

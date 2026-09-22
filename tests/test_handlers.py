@@ -7,20 +7,22 @@ import unittest
 from unittest.mock import patch, AsyncMock
 
 import choi_bot as bot
+from bot.conversation import ConversationQueue
 from bot.llm.contracts import LLMError, LLMResponse
-from bot.llm.router import LLMRouter, legacy_policies
+from bot.llm.router import LLMRouter, task_policies
 from tests.fakes import FakeProvider, FakeClient, FakeChannel, FakeInteraction
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.provider = FakeProvider()
-        self.patches = [patch.object(bot, 'llm_router', LLMRouter({'gemini': self.provider}, legacy_policies(bot.MODEL))),
+        self.patches = [patch.object(bot, 'conversation', ConversationQueue(bot.process_conversation_message)), patch.object(bot, 'llm_router', LLMRouter({'gemini': self.provider}, task_policies(bot.MODEL))),
                         patch.object(bot, 'client', FakeClient()), patch.object(bot, 'API_KEYS', ('fake',)),
                         patch.object(bot, 'save__logs'), patch.object(bot, 'stopflag', 0)]
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)
+        self.addAsyncCleanup(bot.conversation.aclose)
         bot.conversation_context.clear()
         bot.active_users.clear()
         bot.last_conversation_time = 0
@@ -45,7 +47,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('B: 무슨 게임?', b)
         self.assertIn('최씨 봇: 응답', b)
         self.assertEqual(len(bot.conversation_context), 4)
-        self.assertTrue(all(policy.advance_legacy_key for _, policy in self.provider.requests))
+        self.assertTrue(all(policy.model == bot.MODEL for _, policy in self.provider.requests))
 
     async def test_ignore_and_expiration_behavior(self):
         msg = self.message('최씨')
@@ -60,7 +62,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         bot.update_context('A', 'expired')
         bot.last_conversation_time = time.time() - 121
         await bot.on_message(self.message('최씨'))
-        self.assertEqual(self.tasks(), [])  # Preserve expired-but-not-cleared behavior.
+        self.assertEqual(self.tasks(), ['chat'])  # Expiry is now cleared before an explicit call.
 
     async def test_silence_end_and_empty_text_controls(self):
         msg = self.message('최씨')
@@ -81,7 +83,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             await command.callback(interaction, prompt='합성 질문')
             self.assertEqual(self.tasks()[-1], task)
             self.assertTrue(any(c == 'Q. 합성 질문\nA. 응답' for c, _, _ in interaction.channel.sent))
-            self.assertFalse(self.provider.requests[-1][1].advance_legacy_key)
+            self.assertEqual(self.provider.requests[-1][1].model, bot.MODEL)
 
     async def test_summary_and_search_map_reduce(self):
         old = os.getcwd()
@@ -101,8 +103,8 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 os.chdir(old)
 
-    async def test_summary_outer_retry_and_long_output(self):
-        self.provider.results = [LLMError('overload', error_type='quota', retryable=True, provider='gemini'), '부분', '가'*2001]
+    async def test_summary_router_retry_and_long_output(self):
+        self.provider.results = [LLMError('overload', error_type='unavailable', retryable=True, provider='gemini'), '부분', '가'*2001]
         old = os.getcwd()
         with tempfile.TemporaryDirectory() as directory, patch.object(bot, 'API_KEYS', ('one','two')), patch('choi_bot.asyncio.sleep', new_callable=AsyncMock):
             try:
@@ -113,7 +115,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
                 await bot.summary(interaction, '2026-01-01', 0)
                 self.assertEqual(self.tasks(), ['summary_map', 'summary_map', 'summary_reduce'])
                 notation = interaction.channel.sent[0][2]
-                self.assertTrue(any('API 요청 과부하!' in c.kwargs['content'] for c in notation.edit.call_args_list))
+                self.assertEqual(len(self.provider.requests), 3)
                 self.assertTrue(all(len(c) <= 2000 for c, _, _ in interaction.channel.sent))
             finally:
                 os.chdir(old)

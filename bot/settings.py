@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 class Settings:
     api_keys: tuple[str, ...] = field(repr=False)
     discord_token: str | None = field(repr=False)
+    key_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str]):
@@ -17,6 +18,7 @@ class Settings:
             tuple(values[f"GOOGLE_API_KEY{i}"] for i in range(1, 7)
                   if values.get(f"GOOGLE_API_KEY{i}")),
             values.get("DISCORD_BOT_TOKEN"),
+            tuple(f"key{i}" for i in range(1, 7) if values.get(f"GOOGLE_API_KEY{i}")),
         )
 
 

@@ -5,11 +5,26 @@ from bot.llm.contracts import LLMResponse
 
 
 class FakeProvider:
+    key_id = "fake-key"
+    quota_group = "unknown"
+
+    def bind(self, request, policy):
+        return self
+
+    def ready_delay(self):
+        return 0
+
+    def release(self):
+        pass
+
+    async def aclose(self):
+        pass
+
     def __init__(self, *results):
         self.results = list(results)
         self.requests = []
 
-    async def generate(self, request, policy):
+    async def generate(self, request, policy, timeout):
         self.requests.append((request, policy))
         result = self.results.pop(0) if self.results else '응답'
         if isinstance(result, Exception):
@@ -19,6 +34,7 @@ class FakeProvider:
 
 class FakeMessage:
     def __init__(self):
+        self.flags = SimpleNamespace(ephemeral=False)
         self.edit = AsyncMock()
         self.delete = AsyncMock()
         self.jump_url = 'https://example.invalid/message'
@@ -60,9 +76,9 @@ class FakeInteraction:
     def __init__(self):
         self.channel = FakeChannel()
         self.response = FakeResponse(self.channel)
-        self.edit_original_response = AsyncMock()
+        self.edit_original_response = AsyncMock(return_value=FakeMessage())
         self.original_response = AsyncMock(return_value=FakeMessage())
-        self.followup = SimpleNamespace(send=AsyncMock())
+        self.followup = SimpleNamespace(send=AsyncMock(side_effect=self.channel._send))
         self.user = SimpleNamespace(mention='@tester', add_roles=AsyncMock(), remove_roles=AsyncMock())
         self.guild = SimpleNamespace(get_role=lambda role_id: SimpleNamespace(id=role_id, name='알림'))
 
