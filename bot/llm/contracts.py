@@ -19,6 +19,7 @@ class LLMRequest:
     generation_options: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
     timeout: float | None = None  # Optional per-attempt cap, never extends policy.
+    system_instruction: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'messages', tuple(self.messages))

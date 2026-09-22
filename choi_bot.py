@@ -17,7 +17,7 @@ from bot.conversation import ConversationQueue
 from bot.persona import (CHARACTER_PROMPT, COMMAND_PERSONA, VOICE_ONLY,
                          build_conversation_prompt)
 from bot.discord_output import (send, edit, loading, channel_send, progress_edit,
-                                progress_delete, progress_send)
+                                progress_send)
 from types import SimpleNamespace
 
 
@@ -745,8 +745,7 @@ async def 알려줘(interaction: discord.Interaction, *, prompt: str):
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await loading(interaction, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
-        await progress_delete(start)
+        await progress_edit(start, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 정보 제공 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
@@ -784,8 +783,7 @@ async def 자세히(interaction: discord.Interaction, *, prompt: str):
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
-        await progress_delete(start)
-        await loading(interaction, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
+        await progress_edit(start, f"`{nowmodel}에서 답변 생성됨. 경과 시간: {elapsed_time:.2f}s`")
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 자세한 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
         print(console_log)
@@ -882,8 +880,8 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
     5. 메뉴명: 설명                                      
     """, task_type="menu_select")
         final_reply = final_reply.text if final_reply.text is not None else "응애! 대답할 수 없음!"
+        # The original progress message is now the final answer: retain it.
         await loading(interaction, final_reply)
-        await progress_delete(notation)
         save__logs("최씨 봇", final_reply)
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")

@@ -139,14 +139,22 @@ class GeminiAdapter:
     def bind(self, request, policy):
         if self.closed:
             raise _error('closed')
-        if policy.model != self.model or len(request.messages) != 1 or request.messages[0].role != 'user':
+        if (policy.model != self.model or not request.messages
+                or any(m.role not in ('user', 'assistant') or not isinstance(m.content, str)
+                       for m in request.messages)
+                or request.messages[-1].role != 'user'
+                or (request.system_instruction is not None
+                    and not isinstance(request.system_instruction, str))):
             raise _error('invalid_request')
         try:
-            # Preserve all model defaults. No system/history rewrite or thinking change.
+            # Preserve sampling/thinking defaults; transport and system have explicit owners.
             options = dict(request.generation_options)
-            if 'http_options' in options or 'automatic_function_calling' in options:
+            if any(k in options for k in ('http_options', 'automatic_function_calling',
+                                         'system_instruction', 'httpOptions',
+                                         'automaticFunctionCalling', 'systemInstruction')):
                 raise ValueError('Reserved transport option')
-            config = self.types.GenerateContentConfig(**options)
+            config = self.types.GenerateContentConfig(
+                **options, system_instruction=request.system_instruction)
         except Exception:
             raise _error('invalid_request') from None
         healthy = [k for k in self.keys if not k.disabled and not self.groups[(k.group, self.model)].blocked]
@@ -207,8 +215,14 @@ class GeminiRequest:
         self.key.inflight += 1
         start = self.adapter.clock()
         try:
+            # Legacy non-character tasks keep their exact single-string contents.
+            contents = (request.messages[0].content
+                        if len(request.messages) == 1 and request.system_instruction is None
+                        else [types.Content(role='model' if m.role == 'assistant' else 'user',
+                                            parts=[types.Part(text=m.content)])
+                              for m in request.messages])
             response = await self.key.client.aio.models.generate_content(
-                model=policy.model, contents=request.messages[0].content, config=config)
+                model=policy.model, contents=contents, config=config)
             usage = {}
             metadata = response.usage_metadata
             for name in ('prompt_token_count', 'candidates_token_count', 'total_token_count',

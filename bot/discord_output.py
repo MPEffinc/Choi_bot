@@ -4,6 +4,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _progress_failure(operation, error):
+    # Useful lifecycle diagnostics without exception bodies, webhook URLs or tokens.
+    logger.warning('Discord progress %s failed: type=%s status=%s code=%s',
+                   operation, type(error).__name__, getattr(error, 'status', None),
+                   getattr(error, 'code', None))
+
+
 def split_text(content, limit=2000):
     # Count UTF-16 units conservatively (emoji can occupy two units in Discord).
     content = str(content)
@@ -61,23 +68,25 @@ async def progress_edit(message, content):
     try:
         if message is not None:
             await message.edit(content=content)
-    except Exception:
-        logger.warning('Discord progress edit failed; generated result retained')
+    except Exception as error:
+        _progress_failure('edit', error)
 
 
 async def progress_delete(message):
     try:
         if message is not None:
             await message.delete()
-    except Exception:
-        logger.warning('Discord progress deletion failed')
+    except Exception as error:
+        _progress_failure('delete', error)
 
 
 async def progress_send(interaction, content):
     try:
-        return await send(interaction, content)
-    except Exception:
-        logger.warning('Discord progress creation failed')
+        # All current callers defer first. Own the original explicitly rather than
+        # relying on Discord's first-followup-after-defer compatibility behavior.
+        return await edit(interaction, content)
+    except Exception as error:
+        _progress_failure('create', error)
         return None
 
 
