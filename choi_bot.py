@@ -3,15 +3,16 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext import tasks
 from discord.ui import View, Button, Modal, TextInput, Select
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
 import os
-from dotenv import load_dotenv
 from collections import deque
 import time
 import asyncio
 from datetime import datetime
 import re
+
+from bot.settings import Settings, load_settings, validate_settings
+from bot.llm.contracts import LLMError, LLMRequest, Message
+from bot.llm.router import LLMRouter, legacy_policies
 
 
 #환경 변수 및 상수
@@ -22,7 +23,7 @@ ALLOWED_CH = {1383015103926112296, 1348180197714821172, 0} #허용된 대화 채
 ANNOUNCEMENT_CH = 1348180197714821172 #공지 올릴 대화 채널 ID
 ANNOUNCEMENT_TIME = 43200 #공지 올릴 시간
 CHECK_CONTEXT_TIME = 30 #맥락 체크 타이밍
-MODEL = "gemini-2.5-flash-lite" #모델
+MODEL = "gemini-3.5-flash-lite" #모델
 now = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S") #현재시각
 KEY_WORDS = ["최씨", "영원"] #감지 키워드
 reset_flag = 0
@@ -198,111 +199,23 @@ CHARACTER_PROMPT = """
 
 """
 
-# .env 파일에서 API 키 & 토큰 로드
-load_dotenv(dotenv_path="./ini.env")
-API_KEYS = [
-    os.getenv("GOOGLE_API_KEY1"),
-    os.getenv("GOOGLE_API_KEY2"),
-    os.getenv("GOOGLE_API_KEY3"),
-    os.getenv("GOOGLE_API_KEY4"),
-    os.getenv("GOOGLE_API_KEY5"),
-    os.getenv("GOOGLE_API_KEY6")
-]
-API_KEYS = [key for key in API_KEYS if key]
-current_api_index = 0
-call_count = 0
-DISCORD_client_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-
-genai.configure(api_key=API_KEYS[current_api_index])  # 초기 API 키 설정
-model = genai.GenerativeModel(MODEL)
-
-if API_KEYS is None or len(API_KEYS) == 0:
-    raise ValueError("Google Generative AI API KEY ERROR!")
-if DISCORD_client_TOKEN is None:
-    raise ValueError("Discord client TOKEN ERROR!")
+# Runtime dependencies are created explicitly by initialize_runtime(), never import.
+API_KEYS = ()
+client = None
+tree = None
+llm_router = None
 
 
-
-def rotate_api_key():
-    global current_api_index, model
-    current_api_index = (current_api_index + 1) % len(API_KEYS)
-    genai.configure(api_key=API_KEYS[current_api_index])
-    model = genai.GenerativeModel(MODEL)
-    print(f"[DEBUG] API 키 회전됨: {current_api_index}번")
-    return model
-
-
-def is_quota_error(error: Exception):
-    message = str(error).lower()
-    if isinstance(error, ResourceExhausted):
-        return True
-    return (
-        "429" in message
-        or "quota" in message
-        or "rate limit" in message
-        or "resource has been exhausted" in message
-    )
-
-# Google AI API 설정
-def conf_next():
-    global call_count
-    if call_count >= 3: 
-        rotate_api_key()
-        call_count = 0
-        return model
-    call_count += 1
-
-async def generate_content_timeout(prompt, timeout=20):
-    global model
-    loop = asyncio.get_event_loop()
-    max_retry = max(1, len(API_KEYS))
-    last_error = None
-
-    for attempt in range(max_retry):
-        try:
-            response = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: model.generate_content(prompt)),
-                timeout=timeout
-            )
-            if hasattr(response, 'text'):
-                print(f"[DEBUG] 모델 응답 수신: {response.text}")
-            else:
-                print("[DEBUG] 모델 응답 수신: (text 속성 없음)")
-            return response
-        except asyncio.TimeoutError as e:
-            last_error = e
-            print(f"[경고] 요청 타임아웃({timeout}s). 키 회전 후 재시도: {attempt + 1}/{max_retry}")
-        except Exception as e:
-            last_error = e
-            if not is_quota_error(e):
-                raise
-            print(f"[경고] 쿼터/레이트 제한 감지. 키 회전 후 재시도: {attempt + 1}/{max_retry} - {str(e)}")
-
-        if attempt < max_retry - 1 and len(API_KEYS) > 1:
-            rotate_api_key()
-            await asyncio.sleep(0.5)
-
-    if last_error is not None:
-        raise last_error
-    return None
-
-
-
-# 디스코드 봇 설정
-intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
-intents.members = True
-intents.presences = True
-intents.guilds = True
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+async def generate_content_timeout(prompt, timeout=20, *, task_type):
+    if llm_router is None:
+        raise RuntimeError("LLM runtime is not initialized")
+    return await llm_router.generate(LLMRequest(
+        task_type=task_type, messages=(Message("user", prompt),), timeout=timeout,
+    ))
 
 
 #Log folder
 LOG_FOLDER = "logs"
-if not os.path.exists(LOG_FOLDER):
-    os.makedirs(LOG_FOLDER)
 
 def save__logs(user, msg):
     today = datetime.now().strftime("%Y-%m-%d")
@@ -420,7 +333,6 @@ def is_called(message:str):
             return True
     return False
 
-@client.event
 async def on_ready(): #Start client
     guild = discord.Object(id=GUILD_ID)
     tree.clear_commands(guild=guild)
@@ -499,7 +411,6 @@ async def before_announcement():
     """ 봇이 완전히 실행된 후 루프를 시작하도록 설정 """
     await client.wait_until_ready()
 
-@tree.error #invalid commmand
 async def on_application_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.errors.CommandInvokeError):
         await send(interaction, "명령어가 올바르지 않거나, 오류가 발생했습니다.")
@@ -516,7 +427,7 @@ async def on_application_command_error(interaction: discord.Interaction, error: 
 #답변 출력 함수
 async def reply(message, response):
     reply_text = "응애! 대답할 수 없음!"
-    if hasattr(response, 'text'): reply_text = response.text
+    if response.text is not None: reply_text = response.text
     if "마이크 끄는 소리" in reply_text:
         await message.channel.send(reply_text)
         save__logs("최씨 봇", reply_text)
@@ -540,7 +451,6 @@ async def reply(message, response):
     
     
 
-@client.event
 async def on_message(message):
     if message.author == client.user:
         return #ignore client message self
@@ -559,7 +469,6 @@ async def on_message(message):
         active_users.clear() #init users
         global reset_flag
         try:
-            conf_next()
             reset_flag = 0
             user_id = str(message.author.name)
             real_name = USER_MAP.get(user_id, user_id)
@@ -576,7 +485,7 @@ async def on_message(message):
 [출력 규칙]
 - 답변 본문만 출력. '답변:' 같은 라벨 금지
 - 출력 규격을 지켜서 자연스럽게 이어서 말할 것
-""")
+""", task_type="chat")
             await reply(message, response)
             print(conversation_context)
                 
@@ -586,7 +495,6 @@ async def on_message(message):
     #Context Continuity
     elif conversation_context and is_alive():
         try:
-            conf_next()
             reset_flag = 0
             user_id = str(message.author.name)
             real_name = USER_MAP.get(user_id, user_id)
@@ -604,7 +512,7 @@ async def on_message(message):
 
 [출력 규칙]
 - 답변 본문만 출력. '답변:' 같은 라벨 금지
-- 출력 규격을 지켜서 자연스럽게 이어서 말할 것""")
+- 출력 규격을 지켜서 자연스럽게 이어서 말할 것""", task_type="chat")
             await reply(message, response)
             print(conversation_context)
 
@@ -616,12 +524,12 @@ async def on_message(message):
 
 #Commands
 
-@tree.command(name="test", description="test message.")
+@app_commands.command(name="test", description="test message.")
 async def test(interaction: discord.Interaction):
     await send(interaction, "Test Message")
 
 
-@tree.command(name="로그", description="최신 로그에서 n개의 채팅 로그를 불러옵니다.")
+@app_commands.command(name="로그", description="최신 로그에서 n개의 채팅 로그를 불러옵니다.")
 @app_commands.describe(n="가져올 로그 개수 (1~100)")
 async def 로그(interaction: discord.Interaction, n: int):
     if n < 1:
@@ -667,7 +575,7 @@ async def 로그(interaction: discord.Interaction, n: int):
         await send(interaction, f"```\n{chunk}\n```")
 
 
-@tree.command(name="config", description="config settings")
+@app_commands.command(name="config", description="config settings")
 @app_commands.checks.has_permissions(administrator=True)
 async def config(interaction: discord.Interaction, command: str, value: str = None, args: str = None):
     global stopflag
@@ -794,18 +702,17 @@ async def summary(interaction: discord.Interaction,
             success = False
             attempt = 0
             while not success and attempt < max_retry:
-                conf_next()
                 try:
-                    response = await generate_content_timeout(prompt)
-                    summary = response.text if hasattr(response, 'text') else f"{idx + 1}번째 요약 실패."
+                    response = await generate_content_timeout(prompt, task_type="summary_map" if flag == 0 else "search_map")
+                    summary = response.text if response.text is not None else f"{idx + 1}번째 요약 실패."
                     all_summaries.append(summary)
                     print(f"[DEBUG]: {idx + 1}: {summary}\n")
                     await notation.edit(content=f"`{idx + 1}/{len(chunks)} 청크 요약 완료.`")
                     success = True
                 except Exception as e:
-                    if isinstance(e, ResourceExhausted):
+                    if isinstance(e, LLMError) and e.error_type == "quota":
                         err = "API 요청 과부하!"
-                    elif isinstance(e, TimeoutError):
+                    elif isinstance(e, LLMError) and e.error_type == "timeout":
                         err = "요약 요청이 10초를 초과했습니다."
                     else:
                         err = str(e)
@@ -850,18 +757,17 @@ async def summary(interaction: discord.Interaction,
         success = False
         attempt = 0
         while not success and attempt < max_retry:
-            conf_next()
             try:
-                final_response = await generate_content_timeout(final_prompt)
-                final_summary = final_response.text if hasattr(final_response, 'text') else "최종 요약 실패."
+                final_response = await generate_content_timeout(final_prompt, task_type="summary_reduce" if flag == 0 else "search_reduce")
+                final_summary = final_response.text if final_response.text is not None else "최종 요약 실패."
                 if len(final_summary) > 2000:
                     flag = 2  # 너무 길 때 표시
                 print(f"[DEBUG]: 최종 요약: {final_summary}\n")
                 success = True
             except Exception as e:
-                if isinstance(e, ResourceExhausted):
+                if isinstance(e, LLMError) and e.error_type == "quota":
                     err = "API 요청 과부하!"
-                elif isinstance(e, TimeoutError):
+                elif isinstance(e, LLMError) and e.error_type == "timeout":
                     err = "최종 요약 요청이 10초를 초과했습니다."
                 else:
                     err = str(e)
@@ -887,7 +793,7 @@ async def summary(interaction: discord.Interaction,
         await loading(interaction, f"요약 중 오류 발생: {str(e)}")
 
 
-@tree.command(name="요약", description="요약 `YYYY-MM-DD`로 해당 날짜 대화 로그를 분석해 요약해줍니다.")
+@app_commands.command(name="요약", description="요약 `YYYY-MM-DD`로 해당 날짜 대화 로그를 분석해 요약해줍니다.")
 @app_commands.describe(
     date="날짜 형식은 반드시 YYYY-MM-DD여야합니다."
 )
@@ -897,7 +803,7 @@ async def 요약(interaction: discord.Interaction, date: str):
 
 
 
-@tree.command(name="찾기", description="찾기 `YYYY-MM-DD` `찾을 내용`")
+@app_commands.command(name="찾기", description="찾기 `YYYY-MM-DD` `찾을 내용`")
 @app_commands.describe(
     date="날짜 형식은 반드시 YYYY-MM-DD여야합니다.",
     find="검색어를 입력하세요."
@@ -908,25 +814,25 @@ async def 찾기(interaction: discord.Interaction, date: str, *,find: str):
 
     
     
-@tree.command(name="정보", description="봇 정보를 알려줍니다.")
+@app_commands.command(name="정보", description="봇 정보를 알려줍니다.")
 async def 정보(interaction: discord.Interaction):
     now = datetime.fromtimestamp(time.time()).strftime("%Y.%m.%d %H:%M:%S")
     await send(interaction, INFORMATION)
     
-@tree.command(name="후앰아이", description="sex")
+@app_commands.command(name="후앰아이", description="sex")
 async def 후앰아이(interaction: discord.Interaction):
     await send(interaction, WHO_AM_I)
     t = "[DEBUG] 후앰아이 호출"
     print(t)
     #save__logs("Console", t)   
     
-@tree.command(name="stop", description="대화 맥락을 강제로 중지합니다.")
+@app_commands.command(name="stop", description="대화 맥락을 강제로 중지합니다.")
 async def stop(interaction: discord.Interaction):
     await clear_context("Interrupted")
     await send(interaction, "`대화 맥락이 초기화되었습니다.`")   
     
 
-@tree.command(name="질문", description="멍청한 최씨가 답변을 진행합니다.")
+@app_commands.command(name="질문", description="멍청한 최씨가 답변을 진행합니다.")
 @app_commands.describe(
     prompt="최씨에게 하고 싶은 말이 있나요?"
 )
@@ -941,9 +847,9 @@ async def 질문(interaction: discord.Interaction, *, prompt:str):
 다음 질문에 대해 짧게 정보를 제공해.
 정보를 요청하는 질문: {prompt}
 
-답변: """)
+답변: """, task_type="question")
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = f"Q. {prompt}\nA. {response.text}"
+        if response.text is not None: reply_text = f"Q. {prompt}\nA. {response.text}"
         await send(interaction, reply_text)
         save__logs("최씨 봇", reply_text)
         console_log = f"[DEBUG] 명령어 답변 생성됨. 질의: {prompt} 내용: {reply_text}"
@@ -952,7 +858,7 @@ async def 질문(interaction: discord.Interaction, *, prompt:str):
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
-@tree.command(name="알려줘", description=f"조금 더 똑똑한 최씨가 {nowmodel}을 사용해 답변합니다.")
+@app_commands.command(name="알려줘", description=f"조금 더 똑똑한 최씨가 {nowmodel}을 사용해 답변합니다.")
 @app_commands.describe(
     prompt=f"질의에 대한 응답은 {nowmodel}이 담당합니다."
 )
@@ -972,9 +878,9 @@ async def 알려줘(interaction: discord.Interaction, *, prompt: str):
 너무 긴 정보는 최대 2줄까지 요약해.
 정보를 요청하는 질문: {prompt}
 
-답변: """)
+답변: """, task_type="info")
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = f"Q. {prompt}\nA. {response.text}"
+        if response.text is not None: reply_text = f"Q. {prompt}\nA. {response.text}"
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -988,7 +894,7 @@ async def 알려줘(interaction: discord.Interaction, *, prompt: str):
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
-@tree.command(name="자세히", description=f"매우 똑똑한 최씨가 답변해줍니다. {nowmodel}을 사용해서 말이죠...")
+@app_commands.command(name="자세히", description=f"매우 똑똑한 최씨가 답변해줍니다. {nowmodel}을 사용해서 말이죠...")
 @app_commands.describe(
     prompt=f"질문에 대해 {nowmodel}이 제공하는 아주 상세한 답변을 받을 수 있습니다."
 )
@@ -1011,9 +917,9 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
                               
 정보를 요청하는 질문: {prompt}
 
-답변: """)
+답변: """, task_type="detail")
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = f"Q. {prompt}\nA. {response.text}"
+        if response.text is not None: reply_text = f"Q. {prompt}\nA. {response.text}"
         await send(interaction, reply_text)
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -1026,14 +932,14 @@ Z세대의 말투를 사용해. 그러나 이모티콘은 사용하지 마.
     except Exception as e:
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
-@tree.command(name="패치노트", description=f"{BUILD_VERSION}의 최신 패치노트를 확인하세요!")
+@app_commands.command(name="패치노트", description=f"{BUILD_VERSION}의 최신 패치노트를 확인하세요!")
 async def 패치노트(interaction: discord.Interaction):
     await send(interaction, PATCHNOTE)
     t = "[DEBUG] 패치노트 호출"
     print(t)
     #save__logs("Console", t)
 
-@tree.command(name="언제와", description="최씨가 언제 떠났을까요?")
+@app_commands.command(name="언제와", description="최씨가 언제 떠났을까요?")
 async def 언제와(interaction: discord.Interaction):
     e_time = time_since(DEP_TIME)
     r_time = time_since(RET_TIME)
@@ -1043,7 +949,7 @@ async def 언제와(interaction: discord.Interaction):
     print(t)
     #save__logs("Console", t)
 
-@tree.command(name="유저", description="유저 이름 매핑 확인이 가능합니다.")
+@app_commands.command(name="유저", description="유저 이름 매핑 확인이 가능합니다.")
 @app_commands.describe(
     option="미입력: 매핑 출력"
 )
@@ -1092,9 +998,9 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
 3. 후보군3: 설명
 (...)
 10. 후보군15: 설명
-""")
+""", task_type="menu_candidates")
         reply_text = "응애! 대답할 수 없음!"
-        if hasattr(response, 'text'): reply_text = response.text
+        if response.text is not None: reply_text = response.text
         print(f"[DEBUG] {reply_text}")
         final_reply = await generate_content_timeout(f"""
     너는 '무난하고 현실적인 {time} 메뉴'를 추천하는 AI야.
@@ -1109,8 +1015,8 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
     3. 메뉴명: 설명     
     4. 메뉴명: 설명 
     5. 메뉴명: 설명                                      
-    """)
-        if hasattr(final_reply, 'text'): final_reply = final_reply.text
+    """, task_type="menu_select")
+        final_reply = final_reply.text if final_reply.text is not None else "응애! 대답할 수 없음!"
         await loading(interaction, final_reply)
         await notation.delete()
         save__logs("최씨 봇", final_reply)
@@ -1118,7 +1024,7 @@ async def menu_recommand(interaction: discord.Interaction, time, message: str = 
         await send(interaction, f"잉! 잘못된 명령 발생! {str(e)}")
 
 
-@tree.command(name="점메추", description="점심 메뉴가 고민이신가요? 최씨가 추천해드립니다!")
+@app_commands.command(name="점메추", description="점심 메뉴가 고민이신가요? 최씨가 추천해드립니다!")
 @app_commands.describe(
     message="요청사항이 있으시면 추가로 적어주세요."
 )
@@ -1126,7 +1032,7 @@ async def 점메추(interaction: discord.Interaction, *, message: str = None):
     await menu_recommand(interaction, "점심", message)
 
 
-@tree.command(name="저메추", description="저녁 메뉴가 고민이신가요? 최씨가 추천해드립니다!")
+@app_commands.command(name="저메추", description="저녁 메뉴가 고민이신가요? 최씨가 추천해드립니다!")
 @app_commands.describe(
     message="요청사항이 있으시면 추가로 적어주세요."
 )
@@ -1211,9 +1117,8 @@ class TranslateView(View):
         await loading(interaction)
 
         try:
-            conf_next()
-            response = await generate_content_timeout(prompt)
-            result = response.text if hasattr(response, 'text') else "번역 실패!"
+            response = await generate_content_timeout(prompt, task_type="translation")
+            result = response.text if response.text is not None else "번역 실패!"
             await loading(interaction, f"**원본 언어**: {self.message}\n**`{self.target_lang}`번역**: {result}")
         except Exception as e:
             await loading(interaction, f"칩임자 발견, 자가방어시스템을 가동합니다. {str(e)}")
@@ -1227,7 +1132,7 @@ class TranslateView(View):
             except Exception as e:
                 print(f"세션 종료 실패! {e}")
 
-@tree.command(name="번역", description="번역 기능입니다.")
+@app_commands.command(name="번역", description="번역 기능입니다.")
 async def 번역(interaction: discord.Interaction):
     view = TranslateView()
     await send(interaction, "최씨 번역기입니다. \n언어 선택 후 문장 입력을 눌러 번역할 문장을 입력해주세요. \n그 후, 번역 버튼을 누르면 번역이 진행됩니다.", view=view)
@@ -1236,7 +1141,7 @@ async def 번역(interaction: discord.Interaction):
 
 
 
-@tree.command(name="알림", description="역할 부여를 통해 특정 알림을 받을 수 있습니다.")
+@app_commands.command(name="알림", description="역할 부여를 통해 특정 알림을 받을 수 있습니다.")
 @app_commands.describe(role="알림을 받을 역할")
 async def 알림(interaction: discord.Interaction, role: str):
     member = interaction.user
@@ -1253,7 +1158,7 @@ async def 알림(interaction: discord.Interaction, role: str):
         await send(interaction, f"역할 부여에 실패했습니다: {e}", ephemeral=True)
 
 
-@tree.command(name="해제", description="역할 부여를 통해 특정 알림을 해제할 수 있습니다.")
+@app_commands.command(name="해제", description="역할 부여를 통해 특정 알림을 해제할 수 있습니다.")
 @app_commands.describe(role="알림을 해제할 역할")
 async def 해제(interaction: discord.Interaction, role: str):
     member = interaction.user
@@ -1270,7 +1175,7 @@ async def 해제(interaction: discord.Interaction, role: str):
         await send(interaction, f"역할 해제에 실패했습니다: {e}", ephemeral=True)
 
 
-@tree.command(name="공지", description="공지 채널에 공지글을 올리고, 해당 글에 스레드를 자동으로 엽니다.")
+@app_commands.command(name="공지", description="공지 채널에 공지글을 올리고, 해당 글에 스레드를 자동으로 엽니다.")
 @app_commands.describe(
     title="공지 제목",
     content="공지 내용"
@@ -1343,5 +1248,45 @@ async def 해제_autocomplete(interaction: discord.Interaction, current: str):
 
 
 
-# 5️봇 실행 (Jupyter 관련 코드 없이 터미널 실행 가능)
-client.run(DISCORD_client_TOKEN)
+def initialize_runtime(settings: Settings, *, router=None, client_factory=None, tree_factory=None):
+    """Prepare one process runtime without connecting; dependencies may be fakes.
+
+    Global conversation state intentionally retains the existing sharing scope.
+    Call before handling events; this is not a multi-instance application factory.
+    """
+    global API_KEYS, client, tree, llm_router
+    validate_settings(settings)
+    if router is None:
+        from bot.llm.gemini import GeminiAdapter
+        router = LLMRouter(
+            {"gemini": GeminiAdapter(settings.api_keys, MODEL)}, legacy_policies(MODEL),
+        )
+    intents = discord.Intents.default()
+    intents.messages = True
+    intents.message_content = True
+    intents.members = True
+    intents.presences = True
+    intents.guilds = True
+    new_client = (client_factory or discord.Client)(intents=intents)
+    new_tree = (tree_factory or app_commands.CommandTree)(new_client)
+    new_client.event(on_ready)
+    new_client.event(on_message)
+    new_tree.error(on_application_command_error)
+    for command in globals().values():
+        if isinstance(command, app_commands.Command):
+            new_tree.add_command(command)
+    os.makedirs(LOG_FOLDER, exist_ok=True)
+    API_KEYS = settings.api_keys
+    llm_router = router
+    client, tree = new_client, new_tree
+    return client
+
+
+def main():
+    settings = load_settings()
+    runtime_client = initialize_runtime(settings)
+    runtime_client.run(settings.discord_token)
+
+
+if __name__ == "__main__":
+    main()
