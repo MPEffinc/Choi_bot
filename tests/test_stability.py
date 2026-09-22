@@ -68,7 +68,7 @@ class StabilityTests(unittest.IsolatedAsyncioTestCase):
             await entered.wait()
             b=asyncio.create_task(bot.on_message(self.message('최씨 새 질문','B')))
             await asyncio.sleep(0);release.set();await asyncio.gather(a,b)
-        self.assertIn('[새로운 대화 시작됨.]',calls[1])
+        self.assertIn('이 발언으로 새로운 대화가 시작됐다.', calls[1])
         self.assertEqual(list(bot.conversation_context),['B: 최씨 새 질문','최씨 봇: 새 대화'])
 
     async def test_translation_snapshot(self):

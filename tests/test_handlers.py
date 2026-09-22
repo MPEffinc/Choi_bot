@@ -42,10 +42,15 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tasks(), ['chat', 'chat'])
         a, b = [req.messages[0].content for req, _ in self.provider.requests]
         self.assertIn(bot.CHARACTER_PROMPT, a)
-        self.assertIn('[새로운 대화 시작됨.]', a)
+        self.assertIn('이 발언으로 새로운 대화가 시작됐다.', a)
+        self.assertIn('[현재 발언]\nA: 최씨 뭐해?', a)
+        self.assertIn('(없음. 지금 이 발언으로 대화가 시작됨.)', a)
+        self.assertIn('이전 대화에서 이어지는 발언이다.', b)
         self.assertIn('A: 최씨 뭐해?', b)
-        self.assertIn('B: 무슨 게임?', b)
         self.assertIn('최씨 봇: 응답', b)
+        # The new utterance belongs to [현재 발언] only, never also to [이전 대화].
+        self.assertEqual(b.count('B: 무슨 게임?'), 1)
+        self.assertIn('[현재 발언]\nB: 무슨 게임?', b)
         self.assertEqual(len(bot.conversation_context), 4)
         self.assertTrue(all(policy.model == bot.MODEL for _, policy in self.provider.requests))
 

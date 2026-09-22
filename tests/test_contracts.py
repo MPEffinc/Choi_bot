@@ -33,11 +33,12 @@ class ContractTests(unittest.TestCase):
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Name) and n.func.id == 'generate_content_timeout']
         self.assertCountEqual([ast.dump(n.args[0]) for n in calls], baseline['prompts'])
-        self.assertEqual(len(calls), 10)
+        # Phase 1C merged the two conversation branches onto one prompt builder: 10 -> 9.
+        self.assertEqual(len(calls), 9)
         self.assertTrue(all(any(k.arg == 'task_type' for k in n.keywords) for n in calls))
         templates = [ast.dump(n.value) for n in ast.walk(tree) if isinstance(n, ast.Assign)
                      and any(isinstance(x, ast.Name) and x.id in ('CHARACTER_PROMPT', 'prompt', 'final_prompt')
-                             for x in n.targets)]
+                             for x in n.targets)]  # CHARACTER_PROMPT now lives in bot/persona.py.
         normalized = [value.replace("Name(id='source_text', ctx=Load())", "Attribute(value=Name(id='self', ctx=Load()), attr='message', ctx=Load())")
                       .replace("Name(id='target_lang', ctx=Load())", "Attribute(value=Name(id='self', ctx=Load()), attr='target_lang', ctx=Load())")
                       for value in templates]
